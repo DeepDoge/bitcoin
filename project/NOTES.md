@@ -1,3 +1,45 @@
+## 12 — append-only SharedArrayStore / merging pubkey + output (future idea)
+
+context: HashMapStore is append-only — entries are never mutated, only appended; the
+bucket head (link) is the only thing that moves, pointing at the newest entry for a key.
+that means repeated `put`s for the same key preserve full history: truncating back N entries
+restores the previous state of that key's view. the store already gives us "all matches of a
+key" for free if we walk `prevIndex` instead of stopping at the first match.
+
+SharedArrayStore today is NOT append-only — it mutates slots in place (spenderTx gets
+overwritten when an output is spent; prevSamePubkeyOutputIndex would be patched when a new
+same-pubkey output appears). that's why it has to be shared/mmap'd and mutable, and why it
+doesn't fit the `Store` base class cleanly. the field that actually needs mutability is
+`spenderTx`; `ownerTx` and `prevSamePubkeyOutputIndex` could be append-only.
+
+idea (rough, not committed):
+
+- make a variant of SharedArrayStore that is append-only — a links file (per-slot
+  back-pointer / version chain) + a chunks file. truncating the links file rewinds to the
+  previous version of any slot, just like HashMapStore's entries+links. this would let
+  the `output` domain be append-only too.
+- at that point HashMapStore's own `buckets` and `links` ArrayStores collapse into one:
+  each "bucket" IS a link entry (entry pointer + prev), no separate bucket array needed.
+- alternatively / complementary: stop using a separate `output` store for the per-output
+  mutable fields. since every output has a pubkey anyway, put the output's data (ownerTx,
+  prevSamePubkeyOutputIndex, spenderTx) on the pubkey HashMapStore entry's value side and
+  rename the store `output`. then "outputs of a pubkey" = "all matches of that key" walked
+  via prevIndex. index of an output = its link index in the hashmap's links array.
+- blocker i kept hitting: if you put the output data on the hashmap value, you store the
+  scriptPubKey key bytes once per output (key repeated per entry). dedup of the key is
+  exactly what the current `pubkey` store avoids. unless we lean on the link list as the
+  dedup mechanism (head pointer per distinct key, entries chain via prevIndex), the
+  duplication is real and unwanted.
+- the link-list-as-dedup framing is basically what HashMapStore already is. so the
+  "merged" design = HashMapStore where the value carries the per-output mutable state and
+  we walk prevIndex to get history. the open question is whether the per-output mutability
+  (spenderTx) belongs on an append-only-with-version-chain store or whether it stays on a
+  small mutable SharedArrayStore keyed by output index.
+
+conclusion: what we have right now works and is good enough. revisit this only if a future
+change makes the merged/append-only-output shape clearly better (e.g. when wiring
+prevSamePubkeyOutputIndex properly, or when we want output history snapshots for reorgs).
+
 ## 11
 
 ok now make this parallel, again, after some incrimental encoded field optimizations.
