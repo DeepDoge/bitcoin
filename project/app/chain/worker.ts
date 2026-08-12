@@ -61,7 +61,7 @@ function recordBlocks(n: number, tipHeight: number): void {
 // are always this worker's own committed writes.
 
 function tipHeight(): number {
-	return Number(manifest.stores.header.size()) - 1;
+	return manifest.stores.header.size() - 1;
 }
 
 function headerAt(height: number): WireBlockHeader | undefined {
@@ -159,9 +159,9 @@ function applyHeaders(headers: WireBlockHeader[]): ApplyResult {
 		// be rewound too. That reverse-replay is NOT implemented yet — throw rather
 		// than silently serve an inconsistent chain. For IBD off a trusted peer
 		// this never fires. Header-only reorgs above the block tip are fine.
-		if (splitHeight < Number(manifest.stores.block.size()) - 1) {
+		if (splitHeight < manifest.stores.block.size() - 1) {
 			throw new Error(
-				`header reorg to ${splitHeight} is below committed block tip ${Number(manifest.stores.block.size()) - 1}; ` +
+				`header reorg to ${splitHeight} is below committed block tip ${manifest.stores.block.size() - 1}; ` +
 					`block-domain rewind is not implemented`,
 			);
 		}
@@ -186,7 +186,7 @@ self.onmessage = async (event) => {
 	prepare(port);
 	port.start();
 
-	if (Number(manifest.stores.header.size()) === 0) {
+	if (manifest.stores.header.size() === 0) {
 		const height = manifest.stores.header.stage(GENESIS_BLOCK_HEADER_DECODED);
 		manifest.stores.header.reveal(height + 1);
 		manifest.stores.headerhash.put(GENESIS_BLOCK_HASH, height);
@@ -228,7 +228,7 @@ function prepare(port: MessagePortLike): void {
 	// Tell p2p where our block bodies end so it downloads from the next height.
 	// Headers now flow the other way too: p2p fetches them and forwards raw
 	// batches here (type "headers"); this worker applies + pins them and acks.
-	const target = Number(manifest.stores.block.size()) - 1;
+	const target = manifest.stores.block.size() - 1;
 	console.log(`[chain] sync port received, blocks committed up to height ${target}, requesting from p2p`);
 	port.postMessage({ type: "seek", data: target });
 	port.postMessage({ type: "start" });
@@ -317,13 +317,15 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 		// spend recovers any output's global height as firstOutputHeight + vout.
 		// (Under parallel consume this is exactly the per-range base a worker keeps
 		// in memory, seeded from the previous range's completion checkpoint.)
-		let total = Number(output.size());
+		let total = output.size();
 
 		// Outputs created earlier in THIS chunk are staged (written via set())
 		// but not yet revealed — output.get() bounds-checks against the revealed
 		// cursor, so a spend of a same-chunk output would throw RangeError. Keep
 		// an in-memory overlay of everything staged this chunk and consult it
-		// first. (Same-block and same-chunk spends do happen on mainnet.)
+		// first. (Same-block and same-chunk spends do happen on mainnet.) Spends
+		// write live to the store as before; crash rollback of uncommitted spends
+		// is handled by manifest.beforeRecovery at open time.
 		const stagedOutputs = new Map<number, Codec.InferOutput<typeof output.item>>();
 
 		let blocksInChunk = 0;
@@ -347,7 +349,7 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 			// is the block at height i; genesis is pre-seeded at 0 by the header
 			// domain but bodies start after it, so block.size() == the height we're
 			// about to write). Captured before stage() for the consensus checks.
-			const height = Number(manifest.stores.block.size());
+			const height = manifest.stores.block.size();
 
 			// BIP34: from height 227931 the coinbase scriptSig must start with the
 			// serialized block height. The coinbase is always the block's first tx.
@@ -416,12 +418,13 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 							if (existing.spenderTx !== null) {
 								throw new Error(`double spend: output ${prevOutputIndex} already spent`);
 							}
-							// Buffer the spend in the overlay ONLY — never write the
+							// Buffer the spend in the overlay ONLY — never write
 							// spenderTx to the live store during the chunk. A crash
-							// before pin() would otherwise leave a durable spend mark
-							// on an uncommitted slot (mmap writes survive SIGKILL), and
-							// reprocessing the same block on restart would see a false
-							// double-spend. Spends flush to the store after pin() below.
+							// before pin() would leave a durable spend mark on an
+							// already-revealed slot (mmap writes survive SIGKILL)
+							// that cursor-rollback can't undo and beforeRecovery
+							// can't see (the block was never pinned, so its tx data
+							// is cursor-locked on restart). Spends flush after pin().
 							stagedOutputs.set(prevOutputIndex, { ...existing, spenderTx: txIdIndex });
 							prevOutTxId = prevEntryIndex;
 						}
@@ -493,15 +496,14 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 		manifest.pin();
 
 		// Spends were buffered in the overlay all chunk (never written live, so a
-		// crash before this point can't leave a durable spend mark on an
-		// uncommitted slot). Now that pin() has durably committed the chunk —
-		// cursors, tx blobs, the lot — the spends are safe to flush: any crash
-		// from here on restarts from this pin, and reprocessing only happens for
-		// blocks AFTER this one. A crash between pin() and this flush merely drops
-		// some spend marks (a benign UTXO leak), never a false double-spend.
+		// crash before pin can't leave a durable spend mark on an already-revealed
+		// slot). Now that pin() has durably committed, flush them: any crash from
+		// here restarts from this pin and reprocessing only happens for blocks
+		// AFTER this one. A crash between pin() and this flush drops some spend
+		// marks (benign UTXO leak), never a false double-spend.
 		for (const [index, value] of stagedOutputs) output.set(index, value);
 
-		recordBlocks(blocksInChunk, Number(manifest.stores.block.size()) - 1);
+		recordBlocks(blocksInChunk, manifest.stores.block.size() - 1);
 
 		// Ack so p2p's postedChunks - consumedChunks backpressure can drain.
 		port.postMessage({ type: "consume" });

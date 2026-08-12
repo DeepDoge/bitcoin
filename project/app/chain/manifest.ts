@@ -1,4 +1,4 @@
-import { StructCodec, U32 } from "@nomadshiba/codec";
+import { ArrayCodec, StructCodec, U32 } from "@nomadshiba/codec";
 import {
 	Bytes32,
 	NullableNumaricCodec,
@@ -9,6 +9,7 @@ import {
 	StoredOutputIndex,
 	StoredPubKey,
 	StoredPubKeyIndex,
+	StoredTx,
 	StoredTxIdIndex,
 	StoredTxInfo,
 	StoredTxInput,
@@ -119,6 +120,31 @@ export const manifest = Manifest.open({
 			}),
 			minChunkSize: 500 * MB,
 		}),
+	},
+	beforeRecovery({ pins, stores }) {
+		const blockPin = pins.get("block") ?? 0;
+		const blockCurrent = stores.block.size();
+		const output = stores.output;
+		console.log(`[chain] beforeRecovery: block pin=${blockPin} current=${blockCurrent} output.size=${output.size()}`);
+		let cleared = 0;
+		for (let height = blockCurrent - 1; height >= blockPin; height--) {
+			const info = stores.block.get(height);
+			if (!info) continue;
+			const [txs] = stores.tx.get(info.txPointer, new ArrayCodec(StoredTx, { size: info.txCount }));
+			for (const tx of txs) {
+				for (const input of tx.inputs) {
+					if (input.prevOut.txId === null) continue; // coinbase
+					const [, prevValue] = stores.txid.getEntry(input.prevOut.txId);
+					const prevOutputIndex = prevValue.totalOutput + input.prevOut.output;
+					const existing = output.get(prevOutputIndex);
+					if (existing.spenderTx !== null) {
+						output.set(prevOutputIndex, { ...existing, spenderTx: null });
+						cleared++;
+					}
+				}
+			}
+		}
+		console.log(`[chain] beforeRecovery: cleared ${cleared} spends`);
 	},
 });
 
