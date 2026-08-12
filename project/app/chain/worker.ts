@@ -416,9 +416,13 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 							if (existing.spenderTx !== null) {
 								throw new Error(`double spend: output ${prevOutputIndex} already spent`);
 							}
-							const updated = { ...existing, spenderTx: txIdIndex };
-							stagedOutputs.set(prevOutputIndex, updated);
-							output.set(prevOutputIndex, updated);
+							// Buffer the spend in the overlay ONLY — never write the
+							// spenderTx to the live store during the chunk. A crash
+							// before pin() would otherwise leave a durable spend mark
+							// on an uncommitted slot (mmap writes survive SIGKILL), and
+							// reprocessing the same block on restart would see a false
+							// double-spend. Spends flush to the store after pin() below.
+							stagedOutputs.set(prevOutputIndex, { ...existing, spenderTx: txIdIndex });
 							prevOutTxId = prevEntryIndex;
 						}
 
@@ -453,6 +457,9 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 				// This tx's outputs are now accounted for — advance the global base.
 				// Create an output slot for each output: ownerTx = this tx's index,
 				// spenderTx = null (unspent), prevSamePubkeyOutputIndex = null.
+				// Creations land BEYOND the revealed cursor, so a crash before pin
+				// just hides them via cursor rollback — safe to write now (and the
+				// overlay needs them so a later same-chunk spend resolves them).
 				for (let i = 0; i < tx.outputs.length; i++) {
 					const created = { ownerTx: txIdIndex, spenderTx: null, prevSamePubkeyOutputIndex: null };
 					stagedOutputs.set(total + i, created);
@@ -484,6 +491,15 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 		txStore.reveal(txPointer);
 		output.reveal(total);
 		manifest.pin();
+
+		// Spends were buffered in the overlay all chunk (never written live, so a
+		// crash before this point can't leave a durable spend mark on an
+		// uncommitted slot). Now that pin() has durably committed the chunk —
+		// cursors, tx blobs, the lot — the spends are safe to flush: any crash
+		// from here on restarts from this pin, and reprocessing only happens for
+		// blocks AFTER this one. A crash between pin() and this flush merely drops
+		// some spend marks (a benign UTXO leak), never a false double-spend.
+		for (const [index, value] of stagedOutputs) output.set(index, value);
 
 		recordBlocks(blocksInChunk, Number(manifest.stores.block.size()) - 1);
 
