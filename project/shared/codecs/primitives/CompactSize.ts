@@ -5,47 +5,45 @@ import { Uint8ArrayView } from "@project/collections";
 export class CompactSizeCodec extends Codec<number> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(n: number, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(n: number, target: Uint8Array, offset: number): number;
-	public encoder(n: number, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(n: number, target?: TU, offset?: number): [TU, number] {
 		if (target === undefined) {
-			if (n < 0xfd) return Uint8Array.of(n);
+			if (n < 0xfd) return [Uint8Array.of(n) as TU, 1];
 			if (n <= 0xffff) {
 				const buffer = new Uint8Array(3);
 				buffer[0] = 0xfd;
 				new Uint8ArrayView(buffer).setUint16(1, n, true);
-				return buffer;
+				return [buffer as TU, 3];
 			}
 			if (n <= 0xffffffff) {
 				const buffer = new Uint8Array(5);
 				buffer[0] = 0xfe;
 				new Uint8ArrayView(buffer).setUint32(1, n, true);
-				return buffer;
+				return [buffer as TU, 5];
 			}
 			const buffer = new Uint8Array(9);
 			buffer[0] = 0xff;
 			new Uint8ArrayView(buffer).setBigUint64(1, BigInt(n), true);
-			return buffer;
+			return [buffer as TU, 9];
 		}
 		offset = offset!;
 		if (n < 0xfd) {
 			target[offset] = n;
-			return 1;
+			return [target, 1];
 		}
 		const view = new DataView(target.buffer, target.byteOffset + offset);
 		if (n <= 0xffff) {
 			target[offset] = 0xfd;
 			view.setUint16(1, n, true);
-			return 3;
+			return [target, 3];
 		}
 		if (n <= 0xffffffff) {
 			target[offset] = 0xfe;
 			view.setUint32(1, n, true);
-			return 5;
+			return [target, 5];
 		}
 		target[offset] = 0xff;
 		view.setBigUint64(1, BigInt(n), true);
-		return 9;
+		return [target, 9];
 	}
 
 	public decoder(data: Uint8Array, offset: number): [number, number] {

@@ -18,9 +18,7 @@ import { Codec, Stride } from "@nomadshiba/codec";
 export class ScriptNumCodec extends Codec<number> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(value: number, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(value: number, target: Uint8Array, offset: number): number;
-	public encoder(value: number, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: number, target?: TU, offset?: number): [TU, number] {
 		if (!Number.isSafeInteger(value)) throw new Error(`ScriptNum: unsafe integer ${value}`);
 
 		const bytes: number[] = [];
@@ -39,9 +37,9 @@ export class ScriptNumCodec extends Codec<number> {
 			bytes[bytes.length - 1]! |= 0x80;
 		}
 
-		if (target === undefined) return Uint8Array.from(bytes);
+		if (target === undefined) return [Uint8Array.from(bytes) as TU, bytes.length];
 		target.set(bytes, offset!);
-		return bytes.length;
+		return [target, bytes.length];
 	}
 
 	/**

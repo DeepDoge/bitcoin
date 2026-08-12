@@ -234,12 +234,9 @@ type WitnessInput = Codec.InferInput<typeof WitnessEnum> | Uint8Array[];
 export class StoredWitnessCodec extends Codec<StoredWitness, WitnessInput> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(pattern: WitnessInput, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(pattern: WitnessInput, target: Uint8Array, offset: number): number;
-	public encoder(pattern: WitnessInput, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(pattern: WitnessInput, target?: TU, offset?: number): [TU, number] {
 		if (Array.isArray(pattern)) pattern = detectWitnessPattern(pattern);
-		if (target === undefined) return WitnessEnum.encode(pattern);
-		return WitnessEnum.encodeInto(pattern, target, offset);
+		return WitnessEnum.encoder(pattern, target, offset);
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [StoredWitness, number] {

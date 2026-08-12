@@ -3,16 +3,14 @@ import { Codec, Stride } from "@nomadshiba/codec";
 export class U56Codec extends Codec<number> {
 	public readonly stride: Stride<"fixed"> = { kind: "fixed", size: 7 };
 
-	public encoder(value: number, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(value: number, target: Uint8Array, offset: number): number;
-	public encoder(value: number, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: number, target?: TU, offset?: number): [TU, number] {
 		if (!Number.isSafeInteger(value) || value < 0) {
 			throw new RangeError("Value out of range for U56");
 		}
 		if (target === undefined) {
 			const arr = new Uint8Array(7);
 			this.encoder(value, arr, 0);
-			return arr;
+			return [arr as TU, 7];
 		}
 		let remaining = value;
 		for (let i = 6; i >= 0; i--) {
@@ -20,7 +18,7 @@ export class U56Codec extends Codec<number> {
 			target[offset! + i] = byte;
 			remaining = (remaining - byte) / 256;
 		}
-		return 7;
+		return [target, 7];
 	}
 
 	public decoder(data: Uint8Array, offset: number): [number, number] {

@@ -5,16 +5,14 @@ import { Uint8ArrayView } from "@project/collections";
 class PingPongCodec extends Codec<bigint> {
 	public readonly stride: Stride<"fixed"> = { kind: "fixed", size: 8 };
 
-	public encoder(nonce: bigint, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(nonce: bigint, target: Uint8Array, offset: number): number;
-	public encoder(nonce: bigint, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(nonce: bigint, target?: TU, offset?: number): [TU, number] {
 		if (target === undefined) {
 			const buf = new Uint8Array(8);
 			new Uint8ArrayView(buf).setBigUint64(0, nonce, true);
-			return buf;
+			return [buf as TU, 8];
 		}
 		new DataView(target.buffer, target.byteOffset + offset!).setBigUint64(0, nonce, true);
-		return 8;
+		return [target, 8];
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [bigint, number] {

@@ -29,52 +29,50 @@ const NONE: LockTime = { kind: "none" };
 export class LockTimeVersionPackCodec extends Codec<LockTimeAndVersionPack> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(value: LockTimeAndVersionPack, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(value: LockTimeAndVersionPack, target: Uint8Array, offset: number): number;
-	public encoder(value: LockTimeAndVersionPack, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: LockTimeAndVersionPack, target?: TU, offset?: number): [TU, number] {
 		const { version, locktime } = value;
 		const noLock = locktime.kind === "none";
 
 		if (target === undefined) {
-			if (noLock && version === 0x1) return Uint8Array.of(TAG_V1_NONE);
-			if (noLock && version === 0x2) return Uint8Array.of(TAG_V2_NONE);
+			if (noLock && version === 0x1) return [Uint8Array.of(TAG_V1_NONE) as TU, 1];
+			if (noLock && version === 0x2) return [Uint8Array.of(TAG_V2_NONE) as TU, 1];
 			if (!noLock && version === 0x1) {
 				const out = new Uint8Array(1 + 4);
 				out[0] = TAG_V1_SOME;
 				LockTime.encodeInto(locktime, out, 1);
-				return out;
+				return [out as TU, out.length];
 			}
 			if (!noLock && version === 0x2) {
 				const out = new Uint8Array(1 + 4);
 				out[0] = TAG_V2_SOME;
 				LockTime.encodeInto(locktime, out, 1);
-				return out;
+				return [out as TU, out.length];
 			}
 			const out = new Uint8Array(1 + 4 + 4);
 			out[0] = TAG_RAW;
 			U32.encodeInto(version, out, 1);
 			LockTime.encodeInto(locktime, out, 5);
-			return out;
+			return [out as TU, out.length];
 		}
 
 		offset = offset!;
 		if (noLock && version === 0x1) {
 			target[offset] = TAG_V1_NONE;
-			return 1;
+			return [target, 1];
 		}
 		if (noLock && version === 0x2) {
 			target[offset] = TAG_V2_NONE;
-			return 1;
+			return [target, 1];
 		}
 		if (!noLock && (version === 0x1 || version === 0x2)) {
 			target[offset] = version === 0x1 ? TAG_V1_SOME : TAG_V2_SOME;
 			LockTime.encodeInto(locktime, target, offset + 1);
-			return 1 + 4;
+			return [target, 1 + 4];
 		}
 		target[offset] = TAG_RAW;
 		U32.encodeInto(version, target, offset + 1);
 		LockTime.encodeInto(locktime, target, offset + 5);
-		return 1 + 4 + 4;
+		return [target, 1 + 4 + 4];
 	}
 
 	public decoder(data: Uint8Array, offset: number): [LockTimeAndVersionPack, number] {

@@ -52,15 +52,13 @@ function decodeIP(bytes: Uint8Array): string {
 class VersionCodec extends Codec<VersionPayload> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(data: VersionPayload, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(data: VersionPayload, target: Uint8Array, offset: number): number;
-	public encoder(data: VersionPayload, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(data: VersionPayload, target?: TU, offset?: number): [TU, number] {
 		const ua = new TextEncoder().encode(data.userAgent);
 
 		if (target === undefined) {
 			const out = new Uint8Array(4 + 8 + 8 + 8 + 16 + 2 + 8 + 16 + 2 + 8 + 1 + ua.length + 4 + 1);
 			this.encoder(data, out, 0);
-			return out;
+			return [out as TU, out.length];
 		}
 
 		offset = offset!;
@@ -94,7 +92,7 @@ class VersionCodec extends Codec<VersionPayload> {
 		off += 4;
 		target[offset + off++] = data.relay ? 1 : 0;
 
-		return off;
+		return [target, off];
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [VersionPayload, number] {

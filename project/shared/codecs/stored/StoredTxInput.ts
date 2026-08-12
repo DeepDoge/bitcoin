@@ -92,9 +92,7 @@ function sequenceU32ForTag(tag: number): number | null {
 export class StoredTxInputCodec extends Codec<Output, Input> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(input: Input, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(input: Input, target: Uint8Array, offset: number): number;
-	public encoder(input: Input, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(input: Input, target?: TU, offset?: number): [TU, number] {
 		const seqU32 = SequenceLockCodec.toU32(input.sequence) >>> 0;
 		const seqTag = sequenceTagForU32(seqU32);
 		const seqExplicit = seqTag === SEQ_EXPLICIT;
@@ -110,10 +108,10 @@ export class StoredTxInputCodec extends Codec<Output, Input> {
 				scriptSigEncoded.length + witnessEncoded.length;
 			const result = new Uint8Array(totalLength);
 			this.writeInto(input, result, 0, seqU32, seqTag, seqExplicit, scriptSigEncoded, witnessEncoded);
-			return result;
+			return [result as TU, result.length];
 		}
 
-		return this.writeInto(input, target, offset!, seqU32, seqTag, seqExplicit, scriptSigEncoded, witnessEncoded);
+		return [target, this.writeInto(input, target, offset!, seqU32, seqTag, seqExplicit, scriptSigEncoded, witnessEncoded)];
 	}
 
 	private writeInto(

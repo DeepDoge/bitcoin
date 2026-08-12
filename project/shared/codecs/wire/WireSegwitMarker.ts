@@ -5,15 +5,13 @@ import { Codec, Stride } from "@nomadshiba/codec";
 export class WireSegwitMarkerCodec extends Codec<boolean> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(hasWitness: boolean, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(hasWitness: boolean, target: Uint8Array, offset: number): number;
-	public encoder(hasWitness: boolean, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
-		if (target === undefined) return hasWitness ? Uint8Array.of(0x00, 0x01) : new Uint8Array(0);
-		if (!hasWitness) return 0;
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(hasWitness: boolean, target?: TU, offset?: number): [TU, number] {
+		if (target === undefined) return [(hasWitness ? Uint8Array.of(0x00, 0x01) : new Uint8Array(0)) as TU, hasWitness ? 2 : 0];
+		if (!hasWitness) return [target, 0];
 		offset = offset!;
 		target[offset] = 0x00;
 		target[offset + 1] = 0x01;
-		return 2;
+		return [target, 2];
 	}
 
 	public decoder(data: Uint8Array, offset: number): [boolean, number] {

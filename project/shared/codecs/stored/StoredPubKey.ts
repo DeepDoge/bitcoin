@@ -17,9 +17,7 @@ const Pattern = new EnumCodec({
 export class StoredPubKeyCodec extends Codec<Output, Input> {
 	public override stride = Pattern.stride;
 
-	public override encoder(value: Input, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public override encoder(value: Input, target: Uint8Array, offset: number): number;
-	public override encoder(value: Input, target: never, offset: never): number | Uint8Array<ArrayBuffer> {
+	public override encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: Input, target?: TU, offset?: number): [TU, number] {
 		if (value instanceof Uint8Array) return Pattern.encoder(parseRawPubKey(value), target, offset);
 		return Pattern.encoder(value, target, offset);
 	}

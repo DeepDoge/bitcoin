@@ -20,14 +20,12 @@ export type GetDataPayload = {
 class GetDataCodec extends Codec<GetDataPayload> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(data: GetDataPayload, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(data: GetDataPayload, target: Uint8Array, offset: number): number;
-	public encoder(data: GetDataPayload, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(data: GetDataPayload, target?: TU, offset?: number): [TU, number] {
 		if (target === undefined) {
 			const count = data.inventory.length;
 			const out = new Uint8Array(CompactSize.encode(count).length + count * 36);
 			this.encoder(data, out, 0);
-			return out;
+			return [out as TU, out.length];
 		}
 
 		offset = offset!;
@@ -41,7 +39,7 @@ class GetDataCodec extends Codec<GetDataPayload> {
 			target.set(inv.hash, offset + 4);
 			offset += 36;
 		}
-		return offset - start;
+		return [target, offset - start];
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [GetDataPayload, number] {

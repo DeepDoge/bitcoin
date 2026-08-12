@@ -5,16 +5,14 @@ const MAX_U48 = 2 ** 48 - 1;
 export class U48Codec extends Codec<number> {
 	public readonly stride: Stride<"fixed"> = { kind: "fixed", size: 6 };
 
-	public encoder(value: number, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(value: number, target: Uint8Array, offset: number): number;
-	public encoder(value: number, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: number, target?: TU, offset?: number): [TU, number] {
 		if (value < 0 || value > MAX_U48 || !Number.isInteger(value)) {
 			throw new RangeError("Value out of range for U48");
 		}
 		if (target === undefined) {
 			const arr = new Uint8Array(6);
 			this.encoder(value, arr, 0);
-			return arr;
+			return [arr as TU, 6];
 		}
 		const hi = Math.floor(value / 0x100000000);
 		target[offset!] = (hi >>> 8) & 0xff;
@@ -23,7 +21,7 @@ export class U48Codec extends Codec<number> {
 		target[offset! + 3] = (value >>> 16) & 0xff;
 		target[offset! + 4] = (value >>> 8) & 0xff;
 		target[offset! + 5] = value & 0xff;
-		return 6;
+		return [target, 6];
 	}
 
 	public decoder(data: Uint8Array, offset: number): [number, number] {

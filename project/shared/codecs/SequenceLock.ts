@@ -101,12 +101,9 @@ export class SequenceLockCodec extends Codec<SequenceLock> {
 		};
 	}
 
-	public encoder(value: SequenceLock, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(value: SequenceLock, target: Uint8Array, offset: number): number;
-	public encoder(value: SequenceLock, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: SequenceLock, target?: TU, offset?: number): [TU, number] {
 		const seq = SequenceLockCodec.toU32(value);
-		if (target === undefined) return U32LE.encode(seq);
-		return U32LE.encodeInto(seq, target, offset);
+		return U32LE.encoder(seq, target, offset);
 	}
 
 	public decoder(data: Uint8Array, offset: number): [SequenceLock, number] {

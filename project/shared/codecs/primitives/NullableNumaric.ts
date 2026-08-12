@@ -10,9 +10,7 @@ export class NullableNumaricCodec<T extends Codec<number>> extends Codec<Codec.I
 		this.stride = numaric.stride;
 	}
 
-	public override encoder(value: Codec.InferInput<T> | null, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public override encoder(value: Codec.InferInput<T> | null, target: Uint8Array, offset: number): number;
-	public override encoder(value: Codec.InferInput<T> | null, target: any, offset: any): number | Uint8Array<ArrayBuffer> {
+	public override encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(value: Codec.InferInput<T> | null, target?: TU, offset?: number): [TU, number] {
 		if (value === null) return this.numaric.encoder(0, target, offset);
 		return this.numaric.encoder(value + 1, target, offset);
 	}

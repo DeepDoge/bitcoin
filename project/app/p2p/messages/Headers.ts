@@ -12,14 +12,12 @@ const HEADER_STRIDE = WireBlockHeader.stride.size;
 class HeadersCodec extends Codec<HeadersPayload> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(data: HeadersPayload, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(data: HeadersPayload, target: Uint8Array, offset: number): number;
-	public encoder(data: HeadersPayload, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(data: HeadersPayload, target?: TU, offset?: number): [TU, number] {
 		if (target === undefined) {
 			const count = data.headers.length;
 			const out = new Uint8Array(CompactSize.encode(count).length + count * (HEADER_STRIDE + 1));
 			this.encoder(data, out, 0);
-			return out;
+			return [out as TU, out.length];
 		}
 
 		offset = offset!;
@@ -29,7 +27,7 @@ class HeadersCodec extends Codec<HeadersPayload> {
 			offset += WireBlockHeader.encodeInto(header, target, offset);
 			target[offset++] = 0x00; // tx count always 0 in headers msg
 		}
-		return offset - start;
+		return [target, offset - start];
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [HeadersPayload, number] {

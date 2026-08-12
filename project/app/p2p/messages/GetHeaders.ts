@@ -11,13 +11,11 @@ export type GetHeadersPayload = {
 class GetHeadersCodec extends Codec<GetHeadersPayload> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(data: GetHeadersPayload, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(data: GetHeadersPayload, target: Uint8Array, offset: number): number;
-	public encoder(data: GetHeadersPayload, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(data: GetHeadersPayload, target?: TU, offset?: number): [TU, number] {
 		if (target === undefined) {
 			const out = new Uint8Array(4 + 1 + 32 * data.locators.length + 32);
 			this.encoder(data, out, 0);
-			return out;
+			return [out as TU, out.length];
 		}
 
 		offset = offset!;
@@ -32,7 +30,7 @@ class GetHeadersCodec extends Codec<GetHeadersPayload> {
 			off += 32;
 		}
 		target.set(data.stopHash, off);
-		return 4 + 1 + 32 * count + 32;
+		return [target, 4 + 1 + 32 * count + 32];
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [GetHeadersPayload, number] {

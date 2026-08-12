@@ -44,9 +44,7 @@ export type WireTx = {
 class WireTxCodec extends Codec<WireTx, WireTxIn> {
 	public readonly stride: Stride<"variable"> = { kind: "variable" };
 
-	public encoder(tx: WireTxIn, target: undefined, offset: undefined): Uint8Array<ArrayBuffer>;
-	public encoder(tx: WireTxIn, target: Uint8Array, offset: number): number;
-	public encoder(tx: WireTxIn, target?: Uint8Array, offset?: number): Uint8Array<ArrayBuffer> | number {
+	public encoder<TU extends Uint8Array = Uint8Array<ArrayBuffer>>(tx: WireTxIn, target?: TU, offset?: number): [TU, number] {
 		const hasWitness = tx.witness.length > 0;
 
 		if (target === undefined) {
@@ -67,7 +65,7 @@ class WireTxCodec extends Codec<WireTx, WireTxIn> {
 				pos += witnessBytes.length;
 			}
 			result.set(postWitnessBytes, pos);
-			return result;
+			return [result as TU, result.length];
 		}
 
 		offset = offset!;
@@ -75,7 +73,7 @@ class WireTxCodec extends Codec<WireTx, WireTxIn> {
 		offset += WireTxPreWitness.encodeInto({ version: tx.version, hasWitness, inputs: tx.inputs, outputs: tx.outputs }, target, offset);
 		if (hasWitness) offset += encodeWitnessInto(tx.witness, target, offset);
 		offset += WireTxPostWitness.encodeInto({ locktime: tx.locktime }, target, offset);
-		return offset - start;
+		return [target, offset - start];
 	}
 
 	public decoder(bytes: Uint8Array, offset: number): [WireTx, number] {
