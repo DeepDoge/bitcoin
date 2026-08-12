@@ -4,26 +4,30 @@ import {
 	NullableNumaricCodec,
 	StoredBlockHeader,
 	StoredBlockInfo,
+	StoredHeaderHashIndex,
+	StoredHeaderHashPointer,
+	StoredOutputIndex,
 	StoredPubKey,
-	StoredTxIdPointer,
+	StoredPubKeyIndex,
+	StoredTxIdIndex,
 	StoredTxInfo,
 	StoredTxInput,
-	U40,
 	U48,
 	WireTxInput,
 } from "@project/codecs";
 import { COINBASE_TXID, GB, MAX_BLOCK_SIZE, MB } from "@project/utils";
 import { join } from "@std/path";
 import { BASE_DATA_DIR } from "~/env.ts";
-import { ArrayStore, BlobStore, HashMapStore, LoadFactorOptions, Manifest } from "~/libs/storage/mod.ts";
+import { ArrayStore } from "~/libs/storage/ArrayStore.ts";
+import { BlobStore } from "~/libs/storage/BlobStore.ts";
+import { HashMapStore, type LoadFactorOptions } from "~/libs/storage/HashMapStore.ts";
+import { Manifest } from "~/libs/storage/Manifest.ts";
 import { SharedArrayStore } from "~/libs/storage/SharedArrayStore.ts";
 
 const LOAD_FACTOR_OPTIONS: LoadFactorOptions = {
 	target: .75,
 	maxDrift: .25,
 };
-
-const StoredOutputIndex = U40;
 
 export const manifest = Manifest.open({
 	path: join(BASE_DATA_DIR, "manifest"),
@@ -35,14 +39,24 @@ export const manifest = Manifest.open({
 			minChunkSize: 1 * GB,
 		}),
 		headerhash: HashMapStore.open({
-			path: join(BASE_DATA_DIR, "headerhash"),
-			key: Bytes32,
-			value: U32,
-			loadFactor: LOAD_FACTOR_OPTIONS,
 			commiter: self.name === "chain",
-			entryChunkSize: 500 * MB,
-			minBucketChunkSize: 500 * MB,
-			pointer: U40,
+			path: join(BASE_DATA_DIR, "headerhash"),
+			loadFactor: LOAD_FACTOR_OPTIONS,
+			entries: {
+				key: Bytes32,
+				value: U32,
+				chunkSize: 500 * MB,
+				pointer: StoredHeaderHashPointer,
+			},
+			buckets: {
+				initialSize: 1_000_000,
+				minChunkSize: 500 * MB,
+			},
+			links: {
+				index: StoredHeaderHashIndex,
+				minChunkSize: 500 * MB,
+			},
+			sha256: true,
 		}),
 		block: ArrayStore.open({
 			path: join(BASE_DATA_DIR, "block"),
@@ -55,14 +69,24 @@ export const manifest = Manifest.open({
 			restore: { windowLogMax: 27 },
 		}),
 		txid: HashMapStore.open({
-			path: join(BASE_DATA_DIR, "txid"),
-			key: Bytes32, // tx id
-			value: StoredTxInfo,
-			loadFactor: LOAD_FACTOR_OPTIONS,
 			commiter: self.name === "chain",
-			entryChunkSize: 500 * MB,
-			minBucketChunkSize: 500 * MB,
-			pointer: StoredTxIdPointer,
+			path: join(BASE_DATA_DIR, "txid"),
+			loadFactor: LOAD_FACTOR_OPTIONS,
+			entries: {
+				key: Bytes32,
+				value: StoredTxInfo,
+				chunkSize: 500 * MB,
+				pointer: U48,
+			},
+			buckets: {
+				initialSize: 1_000_000,
+				minChunkSize: 500 * MB,
+			},
+			links: {
+				index: StoredTxIdIndex,
+				minChunkSize: 500 * MB,
+			},
+			sha256: true,
 		}),
 		pubkey: HashMapStore.open({
 			commiter: self.name === "chain",
@@ -80,7 +104,7 @@ export const manifest = Manifest.open({
 				minChunkSize: 500 * MB,
 			},
 			links: {
-				index: StoredOutputIndex,
+				index: StoredPubKeyIndex,
 				minChunkSize: 500 * MB,
 			},
 			sha256: true,
@@ -89,9 +113,9 @@ export const manifest = Manifest.open({
 			writable: self.name === "chain",
 			path: join(BASE_DATA_DIR, "output"),
 			item: new StructCodec({
-				ownerTx: StoredTxIdPointer,
-				spenderTx: new NullableNumaricCodec(StoredTxIdPointer),
-				prevSamePubkeyOutputIndex: new NullableNumaricCodec(U40),
+				ownerTx: StoredTxIdIndex,
+				spenderTx: new NullableNumaricCodec(StoredTxIdIndex),
+				prevSamePubkeyOutputIndex: new NullableNumaricCodec(StoredOutputIndex),
 			}),
 			minChunkSize: 500 * MB,
 		}),

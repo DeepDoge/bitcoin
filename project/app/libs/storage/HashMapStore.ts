@@ -187,6 +187,36 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		return entry;
 	}
 
+	public getValueAndIndex(key: Codec.InferInput<Key>, isSha256?: boolean): [Codec.InferOutput<Value>, number] | undefined {
+		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
+		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
+		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : unbias(this.buckets.get(bucket));
+		while (index !== null) {
+			const link = this.links.get(index);
+			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
+			const [, keySize] = this.key.decode(mmap);
+
+			let equal: boolean;
+			if (this.sha256 && isSha256) {
+				sha256.create().update(mmap.subarray(0, keySize)).digestInto(this.sha256Scratch2);
+				equal = equals(this.sha256Scratch2, keyBytes);
+			} else {
+				equal = equals(mmap.subarray(0, keySize), keyBytes);
+			}
+
+			if (equal) {
+				const value = this.value.decode(mmap.subarray(keySize));
+				return [value, index];
+			}
+			index = link.prevIndex;
+		}
+		return undefined;
+	}
+
+	public has(key: Codec.InferInput<Key>, isSha256?: boolean): boolean {
+		return this.getIndex(key, isSha256) !== undefined;
+	}
+
 	public override reveal(size: number): void {
 		if (size < this.cursor) {
 			throw new RangeError(`reveal size=${size} is behind the cursor (size=${this.cursor}); reveal only moves forward`);

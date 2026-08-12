@@ -1,4 +1,4 @@
-import { controlSab } from "~/libs/storage/mod.ts";
+import { controlSab } from "~/libs/storage/SharedArrayStore.ts";
 import { U48 } from "@project/codecs";
 import { PARALLELISM_THREADS } from "~/env.ts";
 import { chainStore } from "~/chain/manifest.ts";

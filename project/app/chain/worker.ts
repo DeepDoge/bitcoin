@@ -1,4 +1,4 @@
-import { Codec, FixedCodec } from "@nomadshiba/codec";
+import { Codec } from "@nomadshiba/codec";
 import { equals } from "@std/bytes";
 import { delay } from "@std/async";
 import { manifest } from "~/chain/manifest.ts";
@@ -12,7 +12,7 @@ import { WireTxs } from "@project/codecs";
 import { COINBASE_TXID, MAX_BLOCK_SIZE } from "@project/utils";
 import { verifyProofOfWork, workFromHeader } from "@project/bitcoin";
 import { Queue } from "@project/collections";
-import { HashMapStore } from "~/libs/storage/mod.ts";
+import { HashMapStore } from "~/libs/storage/HashMapStore.ts";
 import { MessagePortLike } from "@project/message";
 import { WireBlockHeader } from "@project/codecs";
 import { WireBlockHeaders } from "@project/codecs";
@@ -173,9 +173,7 @@ function applyHeaders(headers: WireBlockHeader[]): ApplyResult {
 		const height = manifest.stores.header.stage(header);
 		manifest.stores.header.reveal(height + 1);
 
-		const offset = manifest.stores.headerhash.next(manifest.stores.headerhash.size());
-		const size = manifest.stores.headerhash.stage(header.hash(), height, offset);
-		manifest.stores.headerhash.reveal(offset + size);
+		manifest.stores.headerhash.put(header.hash(), height);
 	}
 	manifest.pin();
 	return { adopted: branch.length, rewind };
@@ -268,24 +266,18 @@ async function tick(port: MessagePortLike): Promise<void> {
 }
 
 /**
- * Append a (key, value) to a HashMapStore and return its entry pointer.
+ * Append a (key, value) to a HashMapStore and return its entry index.
  *
- * The store's commit model is stage → reveal → pin. `stage` writes the entry
- * bytes at the next free slot but doesn't make it findable; a manual `reveal`
- * stages it in the per-worker index so our OWN later `get`/`getPointer` in this
- * same chunk can see it (prevOut lookups, BIP30 overwrite checks) before the
- * round-ending `pin()` wires it into the shared buckets. The entry offset — the
- * value `getPointer` returns — is the stable pointer we store elsewhere.
+ * `put` writes the entry, links it into the per-worker staged index, and
+ * advances the cursor — all internally. The returned index is the stable
+ * reference we store elsewhere (in outputs, prevOuts, etc).
  */
-function putEntry<P extends FixedCodec<number>, K extends Codec, V extends Codec>(
-	store: HashMapStore<P, K, V>,
+function putEntry<K extends Codec, V extends Codec>(
+	store: HashMapStore<K, V>,
 	key: Codec.InferInput<K>,
 	value: Codec.InferInput<V>,
 ): number {
-	const offset = store.next(store.size());
-	const size = store.stage(key, value, offset);
-	store.reveal(offset + size);
-	return offset;
+	return store.put(key, value);
 }
 
 /**
@@ -371,15 +363,15 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 
 				// BIP30 duplicate-txid handling. The store has no in-place update or
 				// delete, but commit() prepends fresh entries to their bucket head
-				// (and our per-worker stage overwrites the staged offset), so simply
+				// (and our per-worker stage overwrites the staged index), so simply
 				// appending a new entry for a duplicate txid makes it win every
 				// read — exactly the OVERWRITE Core does for the two exception
 				// blocks. For every other block BIP34 guarantees uniqueness, so a
 				// duplicate never legitimately happens here.
-				if (bip30Overwrite && manifest.stores.txid.getPointer(tx.txId) !== undefined) {
+				if (bip30Overwrite && manifest.stores.txid.getIndex(tx.txId) !== undefined) {
 					console.log(`[chain] BIP30 overwrite of duplicate coinbase txid at height ${height}`);
 				}
-				const txIdPointer = putEntry(manifest.stores.txid, tx.txId, { totalOutput, txPointer });
+				const txIdIndex = putEntry(manifest.stores.txid, tx.txId, { totalOutput, txPointer });
 
 				const storedTx: Codec.InferInput<typeof StoredTx> = {
 					lockTimeAndVersionPack: { locktime: tx.locktime, version: tx.version },
@@ -388,19 +380,19 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 						if (equals(input.prevOut.txId, COINBASE_TXID)) {
 							prevOutTxId = null;
 						} else {
-							// One txid lookup gives both the prevout's entry pointer (what we
+							// One txid lookup gives both the prevout's entry index (what we
 							// store as prevOutTxId) and its value — which now carries the
 							// prevout tx's firstOutputHeight, so the spent output's global
 							// height is firstOutputHeight + vout with no blob read.
-							const resolved = manifest.stores.txid.getValueAndPointer(input.prevOut.txId);
+							const resolved = manifest.stores.txid.getValueAndIndex(input.prevOut.txId);
 							if (resolved === undefined) {
 								throw new Error("prevOut references a txid not present in the index");
 							}
-							const [prevValue, prevEntryPointer] = resolved;
+							const [prevValue, prevEntryIndex] = resolved;
 							const prevOutputIndex = prevValue.totalOutput + input.prevOut.output;
 							// Spender slots are 1-based: 0 == unspent (fresh mmap reads zero, and
 							// the UTXO set falls out of "slot == 0"), so a spent output stores
-							// spenderTxPointer + 1 and never collides with the sentinel wherever
+							// spenderTxIndex + 1 and never collides with the sentinel wherever
 							// the spending tx landed. Read before write: a non-zero slot means
 							// this output was already spent -> double spend. (Off a trusted IBD
 							// peer this never fires, like the reorg guard; it's the check.)
@@ -409,8 +401,8 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 							if (existingSpender !== 0) {
 								throw new Error(`double spend: output ${prevOutputIndex} already spent`);
 							}
-							spender.item.encodeInto(txIdPointer + 1, spenderSlot);
-							prevOutTxId = prevEntryPointer;
+							spender.item.encodeInto(txIdIndex + 1, spenderSlot);
+							prevOutTxId = prevEntryIndex;
 						}
 
 						return {
@@ -422,31 +414,23 @@ async function consumeChunks(port: MessagePortLike): Promise<void> {
 					}),
 					outputs: tx.outputs.map((output): Codec.InferInput<typeof StoredTxOutput> => {
 						// The pubkey store dedups scripts: each distinct scriptPubKey is
-						// stored ONCE and its entry offset is the stable pointer we hand
-						// out. First sighting -> stage it (value = this tx). Reuse ->
-						// keep the existing pointer and record its stored last-tx
-						// pointer as this output's previousOutputTx link.
-					const pubkeyResult = manifest.stores.pubkey.getValueAndPointer(output.scriptPubKey);
+						// stored ONCE and its entry index is the stable reference we hand
+						// out. First sighting -> put it (value = this tx's index). Reuse ->
+						// keep the existing index.
+					const pubkeyResult = manifest.stores.pubkey.getValueAndIndex(output.scriptPubKey);
 					if (!pubkeyResult) {
-						const pubKeyPointer = putEntry(manifest.stores.pubkey, output.scriptPubKey, txIdPointer);
-							return {
-								value: Number(output.value),
-								previousOutputTx: null,
-								scriptPubKey: pubKeyPointer,
-							};
-						}
-						// getValueAndPointer returns [value, pointer]: value is the
-						// pubkey's last-tx pointer, pointer is the pubkey entry itself
-						// (== the scriptPubKey pointer we store). The store has no
-						// in-place update, so the linked list can't be advanced here;
-						// we record the previous last-tx pointer and reuse the entry.
-						const [previousTxIdPointer, pubKeyPointer] = pubkeyResult;
+						const pubKeyIndex = putEntry(manifest.stores.pubkey, output.scriptPubKey, txIdIndex);
 						return {
 							value: Number(output.value),
-							previousOutputTx: previousTxIdPointer,
-							scriptPubKey: pubKeyPointer,
+							scriptPubKey: pubKeyIndex,
 						};
-					}),
+					}
+					const [, pubKeyIndex] = pubkeyResult;
+					return {
+						value: Number(output.value),
+						scriptPubKey: pubKeyIndex,
+					};
+				}),
 				};
 
 				// This tx's outputs are now accounted for — advance the global base.

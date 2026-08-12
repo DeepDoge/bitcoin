@@ -28,9 +28,7 @@ if (import.meta.main) {
 		const height = manifest.stores.header.stage(GENESIS_BLOCK_HEADER_DECODED);
 		manifest.stores.header.reveal(height + 1);
 
-		const offset = manifest.stores.headerhash.next(manifest.stores.headerhash.size());
-		const size = manifest.stores.headerhash.stage(GENESIS_BLOCK_HASH, height, offset);
-		manifest.stores.headerhash.reveal(offset + size);
+		manifest.stores.headerhash.put(GENESIS_BLOCK_HASH, height);
 
 		manifest.pin();
 		console.log("[main] seeded genesis header");

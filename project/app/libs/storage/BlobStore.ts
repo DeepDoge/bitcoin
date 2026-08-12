@@ -4,7 +4,7 @@ import { MiB, SECOND } from "@project/utils";
 import { existsSync } from "@std/fs";
 import { join } from "@std/path";
 import { PARALLELISM_THREADS } from "~/env.ts";
-import { rm } from "~/libs/fs/mod.ts";
+import { rm } from "~/libs/fs/fs.ts";
 import { ArchiveWorkerPool } from "~/libs/storage/ArchiveWorkerPool.ts";
 import { Store } from "~/libs/storage/Store.ts";
 

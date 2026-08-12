@@ -13,12 +13,15 @@ export * from "~/primitives/U56.ts";
 
 export * from "~/stored/StoredBlockHeader.ts";
 export * from "~/stored/StoredBlockInfo.ts";
+export * from "~/stored/StoredHeaderHashIndex.ts";
+export * from "~/stored/StoredHeaderHashPointer.ts";
 export * from "~/stored/StoredLockTimeVersionPack.ts";
+export * from "~/stored/StoredOutputIndex.ts";
 export * from "~/stored/StoredPrevOutTxId.ts";
 export * from "~/stored/StoredPubKey.ts";
-export * from "~/stored/StoredPubkeyPointer.ts";
+export * from "~/stored/StoredPubKeyIndex.ts";
 export * from "~/stored/StoredTx.ts";
-export * from "~/stored/StoredTxIdPointer.ts";
+export * from "~/stored/StoredTxIdIndex.ts";
 export * from "~/stored/StoredTxInput.ts";
 export * from "~/stored/StoredTxOutput.ts";
 export * from "~/stored/StoredTxPointer.ts";

@@ -1,5 +1,5 @@
 import { ArrayCodec, Bytes, Codec, NullableCodec, StructCodec, U32, VarInt, Void } from "@nomadshiba/codec";
-import { RouterSchema } from "~/libs/routing/mod.ts";
+import { RouterSchema } from "~/libs/routing/Router.ts";
 import { WireBlockHeader } from "@project/codecs";
 import { WireTx } from "@project/codecs";
 import { Bytes32 } from "@project/codecs";

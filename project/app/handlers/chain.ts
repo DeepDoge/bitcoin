@@ -1,6 +1,6 @@
 import { ArrayCodec, Codec } from "@nomadshiba/codec";
 import { decodeHex } from "@std/encoding";
-import { RouterSchema } from "~/libs/routing/mod.ts";
+import { RouterSchema } from "~/libs/routing/Router.ts";
 import { endpointRouter } from "~/router.ts";
 import { Block, Schema, TxSummary } from "~/routes.ts";
 import { manifest, getPrevOutTxId } from "~/chain/manifest.ts";
@@ -42,7 +42,7 @@ function toWireTx(storedTx: StoredTx): Codec.InferInput<typeof WireTx> {
 	}));
 
 	const outputs: Codec.InferInput<typeof WireTxOutput>[] = storedTx.outputs.map((output) => {
-		const [scriptPubKey] = manifest.stores.pubkey.getKey(output.scriptPubKey);
+		const [scriptPubKey] = manifest.stores.pubkey.getEntry(output.scriptPubKey);
 		const value = BigInt(output.value);
 		return { value, scriptPubKey: StoredPubKey.toRaw(scriptPubKey) };
 	});

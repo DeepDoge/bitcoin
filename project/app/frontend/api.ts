@@ -1,4 +1,4 @@
-import { RouterClient } from "~/libs/routing/mod.ts";
+import { RouterClient } from "~/libs/routing/RouterClient.ts";
 import { SCHEMA } from "~/routes.ts";
 
 export const api = RouterClient.create<typeof SCHEMA>({

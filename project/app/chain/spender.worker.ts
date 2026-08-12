@@ -1,4 +1,4 @@
-import { tryAdoptControl } from "~/libs/storage/mod.ts";
+import { tryAdoptControl } from "~/libs/storage/SharedArrayStore.ts";
 import { BytesCodec, VarInt } from "@nomadshiba/codec";
 import { StoredTx } from "@project/codecs";
 import { chainStore } from "~/chain/manifest.ts";

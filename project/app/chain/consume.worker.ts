@@ -217,16 +217,12 @@ function toStored(tx: WireTx): { stored: StoredTx; deferred: Deferred[] } {
 	const deferred: Deferred[] = [];
 
 	const outputs = tx.outputs.map((output): StoredTxOutput => {
-		const pubKeyResult = chainStore.stores.pubkey.getValueAndPointer(output.scriptPubKey);
+		const pubKeyResult = chainStore.stores.pubkey.getValueAndIndex(output.scriptPubKey);
 		if (pubKeyResult === undefined) {
-			throw new Error("pubkey pointer missing after assignment");
+			throw new Error("pubkey index missing after assignment");
 		}
-		const [pubKeyPointer, lastTxIdPointer] = pubKeyResult;
-		// const [lastTxIdEntry] = chainStorage.stores.txid.getEntry(lastTxIdPointer);
-		// const [lastTxId, lastTxPointer] = lastTxIdEntry;
-		// const [lastTx] = chainStorage.stores.tx.get(lastTxPointer, StoredTx);
-		chainStore.stores.pubkey.setValue(pubKeyPointer); // TODO: uhhhh
-		return { value: Number(output.value), scriptPubKey: pubKeyPointer, previousOutputTx: lastTxIdPointer };
+		const [pubKeyIndex] = pubKeyResult;
+		return { value: Number(output.value), scriptPubKey: pubKeyIndex };
 	});
 
 	const inputs = tx.inputs.map((input, index): StoredTxInput => {
@@ -234,18 +230,18 @@ function toStored(tx: WireTx): { stored: StoredTx; deferred: Deferred[] } {
 		const base = { scriptSig: input.scriptSig, sequence: input.sequence, witness };
 
 		if (equals(input.prevOut.txId, COINBASE_TXID) && input.prevOut.output === COINBASE_VOUT) {
-			return { prevOut: { txId: { kind: "coinbase" }, output: input.prevOut.output }, ...base };
+			return { prevOut: { txId: null, output: input.prevOut.output }, ...base };
 		}
 
-		const onDiskPointer = chainStore.stores.txid.get(input.prevOut.txId);
-		if (onDiskPointer !== undefined) {
+		const onDiskIndex = chainStore.stores.txid.getIndex(input.prevOut.txId);
+		if (onDiskIndex !== undefined) {
 			prevOutDiskHits++;
-			return { prevOut: { txId: { kind: "pointer", value: onDiskPointer }, output: input.prevOut.output }, ...base };
+			return { prevOut: { txId: onDiskIndex, output: input.prevOut.output }, ...base };
 		}
 
 		prevOutDeferred++;
 		deferred.push({ inputIndex: index, txid: input.prevOut.txId });
-		return { prevOut: { txId: { kind: "pointer", value: 0 }, output: input.prevOut.output }, ...base };
+		return { prevOut: { txId: 0, output: input.prevOut.output }, ...base };
 	});
 
 	return { stored: { locktime: tx.locktime, version: tx.version, outputs, inputs }, deferred };
