@@ -1,5 +1,4 @@
 import { manifest } from "~/chain/manifest.ts";
-import { GENESIS_BLOCK_HASH, GENESIS_BLOCK_HEADER_DECODED } from "~/chain/genesis.ts";
 import { ARGS } from "~/env.ts";
 
 function wireWorker(name: string, url: URL): Worker {
@@ -23,16 +22,6 @@ if (import.meta.main) {
 	Deno.addSignalListener("SIGINT", () => Deno.kill(Deno.pid, "SIGKILL"));
 
 	console.log("[main] rolling back to last pinned sizes");
-
-	if (manifest.stores.header.size() === 0) {
-		const height = manifest.stores.header.stage(GENESIS_BLOCK_HEADER_DECODED);
-		manifest.stores.header.reveal(height + 1);
-
-		manifest.stores.headerhash.put(GENESIS_BLOCK_HASH, height);
-
-		manifest.pin();
-		console.log("[main] seeded genesis header");
-	}
 
 	console.log("[main] spawning p2p + chain workers");
 	const p2pWorker = wireWorker("p2p", new URL("./p2p/worker.ts", import.meta.url));

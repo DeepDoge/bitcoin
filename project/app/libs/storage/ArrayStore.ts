@@ -34,20 +34,22 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 		return new ArrayStore(blob, options);
 	}
 
-	public size(): number {
-		return this.blob.size() / this.item.stride.size;
+	public size(): bigint {
+		return this.blob.size() / BigInt(this.item.stride.size);
 	}
 
-	public reveal(size: number, isBroadcast?: boolean): void {
-		return this.blob.reveal(size * this.item.stride.size, isBroadcast);
+	public reveal(size: bigint | number, isBroadcast?: boolean): void {
+		const target = typeof size === "bigint" ? size : BigInt(size);
+		return this.blob.reveal(target * BigInt(this.item.stride.size), isBroadcast);
 	}
 
-	public truncate(size: number): void {
-		return this.blob.truncate(size * this.item.stride.size);
+	public truncate(size: bigint | number): void {
+		const target = typeof size === "bigint" ? size : BigInt(size);
+		return this.blob.truncate(target * BigInt(this.item.stride.size));
 	}
 
 	public get(index: number): Codec.InferOutput<T> | undefined {
-		const length = this.size();
+		const length = Number(this.size());
 		if (index < 0) {
 			throw new RangeError(`get out of bounds index=${index} length=${length}`);
 		}
@@ -57,7 +59,7 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 	}
 
 	public async getAsync(index: number): Promise<Codec.InferOutput<T> | undefined> {
-		const length = this.size();
+		const length = Number(this.size());
 		if (index < 0) {
 			throw new RangeError(`get out of bounds index=${index} length=${length}`);
 		}
@@ -70,7 +72,7 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 	}
 
 	public slice(start: number, end: number): Codec.InferOutput<T>[] {
-		const length = this.size();
+		const length = Number(this.size());
 		if (end > length) end = length;
 		if (start < 0) {
 			throw new RangeError(`slice out of bounds start=${start} end=${end} length=${length}`);
@@ -82,7 +84,7 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 	}
 
 	public async sliceAsync(start: number, end: number): Promise<Codec.InferOutput<T>[]> {
-		const size = this.size();
+		const size = Number(this.size());
 		if (end > size) end = size;
 		if (start < 0) {
 			throw new RangeError(`slice out of bounds start=${start} end=${end} size=${size}`);
@@ -101,7 +103,7 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 	}
 
 	public stage(item: Codec.InferInput<T>, index?: number): number {
-		const size = this.size();
+		const size = Number(this.size());
 		index ??= size;
 		if (index < size) {
 			throw new RangeError([

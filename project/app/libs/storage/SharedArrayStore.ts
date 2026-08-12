@@ -23,8 +23,12 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	public readonly chunkSize: number;
 	public readonly slotsPerChunk: number;
 
-	private cursor: BigUint64Array;
+	// The cursor lives in its own shared mapping so every opener (writer and
+	// readers alike) observes the same size without waiting on the manifest's
+	// broadcast — the writer's stores are instantly visible through the page
+	// cache, and the file doubles as the restart-time restore point.
 	private cursorMmap: Mmap;
+	private cursor: BigUint64Array;
 	private chunks = new Map<number, Chunk>();
 	private readonly scratch: Uint8Array;
 
@@ -65,24 +69,30 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 		return chunk;
 	}
 
-	public override size(): number {
-		return Number(Atomics.load(this.cursor, 0));
+	public override size(): bigint {
+		return Atomics.load(this.cursor, 0);
 	}
 
-	public override truncate(size: number): number {
+	public override truncate(size: bigint | number): void {
 		if (!this.writable) throw new Error("SharedArrayStore is read-only");
-		if (size > this.size()) {
-			throw new RangeError(`truncate size=${size} is after the cursor (size=${this.size()}); truncate only moves backwards`);
+		const target = typeof size === "bigint" ? size : BigInt(size);
+		if (target > this.size()) {
+			throw new RangeError(`truncate size=${target} is after the cursor (size=${this.size()}); truncate only moves backwards`);
 		}
-		return Number(Atomics.add(this.cursor, 0, BigInt(size)));
+		Atomics.store(this.cursor, 0, target);
 	}
 
-	public override reveal(size: number): number {
-		if (!this.writable) throw new Error("SharedArrayStore is read-only");
-		if (size < this.size()) {
-			throw new RangeError(`reveal size=${size} is behind the cursor (size=${this.size()}); reveal only moves forward`);
+	public override reveal(size: bigint | number): void {
+		// Readers observe the writer's cursor directly through the shared mapping,
+		// which is always at or ahead of the last pinned broadcast. A broadcast
+		// arriving "behind" is therefore expected — the reader is already caught
+		// up — so readers treat reveal as a no-op rather than throwing.
+		if (!this.writable) return;
+		const target = typeof size === "bigint" ? size : BigInt(size);
+		if (target < this.size()) {
+			throw new RangeError(`reveal size=${target} is behind the cursor (size=${this.size()}); reveal only moves forward`);
 		}
-		return Number(Atomics.add(this.cursor, 0, BigInt(size)));
+		Atomics.store(this.cursor, 0, target);
 	}
 
 	public set(index: number, value: Codec.InferInput<T>): void {
@@ -98,7 +108,7 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	}
 
 	public get(index: number): Codec.InferOutput<T> {
-		if (index >= this.size()) throw new RangeError();
+		if (index >= Number(this.size())) throw new RangeError();
 		const local = index % this.slotsPerChunk;
 		const chunk = this.chunk((index - local) / this.slotsPerChunk);
 		const versionOffset = local * this.slotStride;

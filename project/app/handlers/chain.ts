@@ -122,14 +122,13 @@ endpointRouter.registerHandler("GET /v1/block?to=:to&take=:take", async ({ param
 });
 
 endpointRouter.registerHandler("GET /v1/block/tip", async () => {
-	const height = manifest.stores.header.size() - 1;
+	const height = Number(manifest.stores.header.size()) - 1;
 	if (height < 0) throw new Error("not suppose to happen");
 	return { status: "OK", data: await getBlockByHeight(height) };
 });
 
 endpointRouter.registerHandler("GET /v1/block/:hashOrHeight", async ({ params }) => {
 	const height = resolveHeight(params.pathname.hashOrHeight);
-	console.log(height);
 	if (height === undefined) return { status: "OK", data: null };
 	return { status: "OK", data: await getBlockByHeight(height) };
 });

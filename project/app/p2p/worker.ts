@@ -157,7 +157,7 @@ function keepDownloading(): boolean {
 // always its own committed writes.
 
 function tipHeight(): number {
-	return manifest.stores.header.size() - 1;
+	return Number(manifest.stores.header.size()) - 1;
 }
 
 function headerAt(height: number): WireBlockHeader | undefined {

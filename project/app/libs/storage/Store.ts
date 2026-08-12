@@ -1,6 +1,6 @@
 export abstract class Store {
-	public abstract size(): number;
-	public abstract reveal(size: number): void;
-	public abstract truncate(size: number): void;
+	public abstract size(): bigint;
+	public abstract reveal(size: bigint | number): void;
+	public abstract truncate(size: bigint | number): void;
 	public abstract sync(): void;
 }

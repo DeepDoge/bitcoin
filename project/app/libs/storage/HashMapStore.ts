@@ -43,12 +43,11 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	private sha256Scratch1: Uint8Array<ArrayBuffer>;
 	private sha256Scratch2: Uint8Array<ArrayBuffer>;
 	private keyScratch: Uint8Array<ArrayBuffer>;
-	private cursor: number;
 
 	private maxEntrySize: number;
 	private loadFactor: LoadFactorOptions;
 
-	private buckets: SharedArrayStore<FixedCodec<number>>;
+	private buckets: SharedArrayStore<NullableNumaricCodec<FixedCodec<number>>>;
 	private links: SharedArrayStore<StructCodec<{ prevIndex: NullableNumaricCodec<FixedCodec<number>>; entryPointer: FixedCodec<number> }>>;
 	private entries: BlobStore;
 
@@ -56,6 +55,8 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	private stagedBuckets: Map<number, number>;
 
 	private lockFile: Deno.FsFile | null;
+
+	private readonly indexBits = 64n;
 
 	private constructor(options: HashMapStoreOptions<Key, Value>) {
 		super();
@@ -68,7 +69,6 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		this.sha256Scratch1 = new Uint8Array(32);
 		this.sha256Scratch2 = new Uint8Array(32);
 		this.keyScratch = new Uint8Array(MAX_BLOCK_SIZE);
-		this.cursor = 0;
 
 		this.maxEntrySize = options.entries.maxEntrySize ?? this.entry.stride.size!;
 		this.loadFactor = options.loadFactor;
@@ -77,6 +77,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 
 		this.lockFile = null;
 		if (options.commiter) {
+			Deno.mkdirSync(this.path, { recursive: true });
 			const lockFile = Deno.openSync(join(this.path, "COMMITTER.lock"), { create: true, read: true, write: true });
 			if (!lockFile.tryLockSync(true)) {
 				lockFile.close();
@@ -88,7 +89,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		this.buckets = SharedArrayStore.open({
 			path: join(this.path, "buckets"),
 			writable: options.commiter,
-			item: options.links.index,
+			item: new NullableNumaricCodec(options.links.index),
 			minChunkSize: options.buckets.minChunkSize,
 		});
 		this.links = SharedArrayStore.open({
@@ -103,8 +104,8 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		});
 
 		if (options.commiter) {
-			if (this.buckets.size() === 0) this.buckets.reveal(options.buckets.initialSize);
-			if (this.links.size() === 0) {
+			if (Number(this.buckets.size()) === 0) this.buckets.reveal(options.buckets.initialSize);
+			if (Number(this.links.size()) === 0) {
 				this.links.reveal(1);
 				this.links.set(0, { prevIndex: null, entryPointer: 0 });
 			}
@@ -115,25 +116,45 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		return new HashMapStore(options);
 	}
 
-	public override size(): number {
-		return this.cursor;
+	private pack(bucketCount: number, entryCount: number): bigint {
+		return (BigInt(bucketCount) << this.indexBits) | BigInt(entryCount);
+	}
+
+	private unpack(size: bigint): [number, number] {
+		const mask = (1n << this.indexBits) - 1n;
+		return [Number(size >> this.indexBits), Number(size & mask)];
+	}
+
+	public override size(): bigint {
+		const links = Number(this.links.size());
+		return this.pack(Number(this.buckets.size()), links > 0 ? links - 1 : 0);
+	}
+
+	public get entryCount(): number {
+		const links = Number(this.links.size());
+		return links > 0 ? links - 1 : 0;
 	}
 
 	public put(key: Codec.InferInput<Key>, value: Codec.InferInput<Value>): number {
-		const index = this.cursor;
+		const index = this.entryCount;
 		const from = this.links.get(index).entryPointer;
 		const written = this.entry.encodeInto([key, value], this.entries.mmap(this.maxEntrySize, from));
 		this.entries.reveal(from + written);
-		this.links.reveal(1);
+		// Stage the next free pointer slot BEFORE reveal(): reveal()'s linking
+		// loop reads links.get(index) and rewrites its prevIndex (entryPointer is
+		// preserved), then advances the links cursor past index + 1. Advancing
+		// the links cursor first would make entryCount == the reveal target and
+		// the linking loop would never run — the entry would be written but
+		// unreachable from its bucket.
 		this.links.set(index + 1, { prevIndex: null, entryPointer: this.entries.next(this.maxEntrySize, from + written) });
-		this.reveal(this.cursor + 1);
+		this.reveal(this.pack(Number(this.buckets.size()), index + 1));
 		return index;
 	}
 
 	public get(key: Codec.InferInput<Key>, isSha256?: boolean): Codec.InferOutput<Value> | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
-		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : unbias(this.buckets.get(bucket));
+		const bucket = this.hashKey(keyBytes, isSha256) % Number(this.buckets.size());
+		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
 		while (index !== null) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
@@ -148,7 +169,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 			}
 
 			if (equal) {
-				const value = this.value.decode(mmap.subarray(keySize));
+				const [value] = this.value.decode(mmap.subarray(keySize));
 				return value;
 			}
 			index = link.prevIndex;
@@ -158,8 +179,8 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 
 	public getIndex(key: Codec.InferInput<Key>, isSha256?: boolean): number | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
-		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : unbias(this.buckets.get(bucket));
+		const bucket = this.hashKey(keyBytes, isSha256) % Number(this.buckets.size());
+		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
 		while (index !== null) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
@@ -189,8 +210,8 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 
 	public getValueAndIndex(key: Codec.InferInput<Key>, isSha256?: boolean): [Codec.InferOutput<Value>, number] | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
-		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : unbias(this.buckets.get(bucket));
+		const bucket = this.hashKey(keyBytes, isSha256) % Number(this.buckets.size());
+		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
 		while (index !== null) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
@@ -205,7 +226,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 			}
 
 			if (equal) {
-				const value = this.value.decode(mmap.subarray(keySize));
+				const [value] = this.value.decode(mmap.subarray(keySize));
 				return [value, index];
 			}
 			index = link.prevIndex;
@@ -217,45 +238,58 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		return this.getIndex(key, isSha256) !== undefined;
 	}
 
-	public override reveal(size: number): void {
-		if (size < this.cursor) {
-			throw new RangeError(`reveal size=${size} is behind the cursor (size=${this.cursor}); reveal only moves forward`);
+	public override reveal(size: bigint | number): void {
+		const target = typeof size === "bigint" ? size : BigInt(size);
+		const [targetBuckets, targetEntries] = this.unpack(target);
+		const [currentBuckets, currentEntries] = this.unpack(this.size());
+		// Readers observe sub-store cursors directly through their shared
+		// mappings, which are always at or ahead of the last pinned broadcast —
+		// so a broadcast arriving "behind" is the normal, already-caught-up case
+		// for them. Only the writer enforces the forward-only invariant.
+		if (this.commiter && targetEntries < currentEntries) {
+			throw new RangeError(`reveal entries=${targetEntries} is behind the cursor (entries=${currentEntries}); reveal only moves forward`);
 		}
+		// Sub-stores first: the linking loop below reads links.get(index) and
+		// buckets.get(bucket), which bounds-check against their own cursors.
+		this.buckets.reveal(targetBuckets);
+		this.links.reveal(targetEntries + 1);
 		if (this.commiter) {
-			for (let index = this.cursor; index < size; index++) {
+			for (let index = currentEntries; index < targetEntries; index++) {
 				const link = this.links.get(index);
 				const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
 				const [, keySize] = this.key.decode(mmap);
-				const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
-				const head = this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : unbias(this.buckets.get(bucket));
+				const bucket = this.hashKey(mmap.subarray(0, keySize), false) % Number(this.buckets.size());
+				const head = this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
 				this.links.set(index, { prevIndex: head, entryPointer: link.entryPointer });
 				this.stagedBuckets.set(bucket, index);
 			}
 		}
-		this.cursor = size;
 	}
 
-	public override truncate(size: number): void {
-		if (size > this.cursor) throw new RangeError(`truncate size=${size} is ahead of the cursor (size=${this.cursor})`);
-		for (let index = this.cursor - 1; index >= size; index--) {
+	public override truncate(size: bigint | number): void {
+		const target = typeof size === "bigint" ? size : BigInt(size);
+		const [targetBuckets, targetEntries] = this.unpack(target);
+		const [currentBuckets, currentEntries] = this.unpack(this.size());
+		if (targetEntries > currentEntries) throw new RangeError(`truncate entries=${targetEntries} is ahead of the cursor (entries=${currentEntries})`);
+		for (let index = currentEntries - 1; index >= targetEntries; index--) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
 			const [, keySize] = this.key.decode(mmap);
-			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
-			this.buckets.set(bucket, bias(link.prevIndex));
+			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % Number(this.buckets.size());
+			this.buckets.set(bucket, link.prevIndex);
 		}
 		this.stagedBuckets.clear();
-		const entriesEnd = this.links.get(size).entryPointer;
-		this.links.truncate(size + 1);
+		const entriesEnd = this.links.get(targetEntries).entryPointer;
+		this.links.truncate(targetEntries + 1);
 		this.entries.truncate(entriesEnd);
-		this.cursor = size;
+		this.buckets.truncate(targetBuckets);
 	}
 
 	public override sync(): void {
 		this.entries.sync();
 		this.links.sync();
 		for (const [bucket, index] of this.stagedBuckets) {
-			this.buckets.set(bucket, bias(index));
+			this.buckets.set(bucket, index);
 		}
 		this.stagedBuckets.clear();
 		this.buckets.sync();
@@ -294,12 +328,4 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	public [Symbol.dispose](): void {
 		this.close();
 	}
-}
-
-function unbias(stored: number): number | null {
-	return stored === 0 ? null : stored - 1;
-}
-
-function bias(index: number | null): number {
-	return index === null ? 0 : index + 1;
 }

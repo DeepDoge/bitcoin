@@ -42,7 +42,7 @@ type Chunk = { mapping: Mmap; bytes: Uint8Array };
 export class BlobStore extends Store implements Disposable {
 	public readonly path: string;
 	public readonly chunkSize: number;
-	private cursor: number;
+	private cursor: bigint;
 
 	private pool: ArchiveWorkerPool | undefined;
 	private maxRestoredChunks = 0;
@@ -56,7 +56,7 @@ export class BlobStore extends Store implements Disposable {
 
 	private constructor(options: BlobStoreOptions) {
 		super();
-		this.cursor = 0;
+		this.cursor = 0n;
 		this.path = options.path;
 		this.chunkSize = options.chunkSize;
 		// Restore is a READ-path concern, needed by every opener regardless of
@@ -79,19 +79,20 @@ export class BlobStore extends Store implements Disposable {
 		for (const chunk of this.chunks.values()) chunk.mapping.flush();
 	}
 
-	public override size(): number {
+	public override size(): bigint {
 		return this.cursor;
 	}
 
-	public next(maxItemSize: number, from: number = this.size()): number {
+	public next(maxItemSize: number, from: number = Number(this.size())): number {
 		const room = this.chunkSize - (from % this.chunkSize);
 		return room < maxItemSize ? from + room : from;
 	}
 
-	public reveal(size: number, _isBroadcast?: boolean): void {
+	public reveal(size: bigint | number, _isBroadcast?: boolean): void {
+		const target = typeof size === "bigint" ? size : BigInt(size);
 		const current = this.size();
-		if (size < current) throw new RangeError(`reveal size=${size} is behind the cursor (size=${current}); reveal only moves forward`);
-		this.cursor = size;
+		if (target < current) throw new RangeError(`reveal size=${target} is behind the cursor (size=${current}); reveal only moves forward`);
+		this.cursor = target;
 	}
 
 	/** append convenience: write at the cursor then reveal past it. sugar over commit+reveal. */
@@ -101,11 +102,12 @@ export class BlobStore extends Store implements Disposable {
 		return from;
 	}
 
-	public truncate(size: number): void {
-		if (size < 0) throw new RangeError(`truncate size=${size} must be non-negative`);
-		const current = this.size();
+	public truncate(size: bigint | number): void {
+		const target = typeof size === "bigint" ? Number(size) : size;
+		if (target < 0) throw new RangeError(`truncate size=${target} must be non-negative`);
+		const current = Number(this.size());
 		const oldTailIndex = Math.floor(current / this.chunkSize);
-		const newTailIndex = Math.floor(size / this.chunkSize);
+		const newTailIndex = Math.floor(target / this.chunkSize);
 
 		for (let index = oldTailIndex; index > newTailIndex; index--) {
 			this.closeChunk(index);
@@ -119,11 +121,11 @@ export class BlobStore extends Store implements Disposable {
 			rm(archiveTmpPath(tailPath));
 		}
 
-		this.cursor = size;
+		this.cursor = BigInt(target);
 	}
 
 	public get<T extends Codec>(pointer: number, codec: T): [Codec.InferOutput<T>, number] {
-		const size = this.size();
+		const size = Number(this.size());
 		if (pointer >= size) throw new Error(`read at offset=${pointer} is past the cursor (size=${size})`);
 		const index = Math.floor(pointer / this.chunkSize);
 		const map = this.chunk(index);
@@ -131,7 +133,7 @@ export class BlobStore extends Store implements Disposable {
 	}
 
 	public async getAsync<T extends Codec>(pointer: number, codec: T): Promise<[Codec.InferOutput<T>, number]> {
-		const size = this.size();
+		const size = Number(this.size());
 		if (pointer >= size) throw new Error(`read at offset=${pointer} is past the cursor (size=${size})`);
 		const index = Math.floor(pointer / this.chunkSize);
 		const map = await this.chunkAsync(index);
@@ -140,7 +142,7 @@ export class BlobStore extends Store implements Disposable {
 
 	// TODO: later get rid of this infavor of mmap()
 	public stage(offset: number, bytes: Uint8Array): number {
-		const size = this.size();
+		const size = Number(this.size());
 		if (offset < size) throw new Error(`write offset=${offset} is behind the cursor (size=${size}); writes never overwrite live data`);
 		const index = Math.floor(offset / this.chunkSize);
 		const start = offset % this.chunkSize;
@@ -255,7 +257,7 @@ export class BlobStore extends Store implements Disposable {
 
 	private async runArchiveLoop(pool: ArchiveWorkerPool): Promise<void> {
 		while (!this.disposed) {
-			const tailIndex = Math.floor(this.size() / this.chunkSize);
+			const tailIndex = Math.floor(Number(this.size()) / this.chunkSize);
 			const batch: Promise<void>[] = [];
 			for (let index = 0; index < tailIndex && !this.disposed; index++) {
 				const path = chunkPath(this.path, index);

@@ -31,7 +31,7 @@ const LOAD_FACTOR_OPTIONS: LoadFactorOptions = {
 
 export const manifest = Manifest.open({
 	path: join(BASE_DATA_DIR, "manifest"),
-	pinner: self.name === "",
+	pinner: self.name === "chain",
 	stores: {
 		header: ArrayStore.open({
 			path: join(BASE_DATA_DIR, "header"),
