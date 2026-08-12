@@ -36,8 +36,8 @@ export const manifest = Manifest.open({
 		}),
 		headerhash: HashMapStore.open({
 			path: join(BASE_DATA_DIR, "headerhash"),
-			key: Bytes32, // block hash
-			value: U32, // block height
+			key: Bytes32,
+			value: U32,
 			loadFactor: LOAD_FACTOR_OPTIONS,
 			commiter: self.name === "chain",
 			entryChunkSize: 500 * MB,
@@ -52,7 +52,7 @@ export const manifest = Manifest.open({
 		tx: BlobStore.open({
 			path: join(BASE_DATA_DIR, "tx"),
 			chunkSize: 1 * GB,
-			restore: { windowLogMax: 27 }, // must cover the archive's windowLog (27)
+			restore: { windowLogMax: 27 },
 		}),
 		txid: HashMapStore.open({
 			path: join(BASE_DATA_DIR, "txid"),
