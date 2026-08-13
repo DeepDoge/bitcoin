@@ -40,7 +40,6 @@ export const manifest = Manifest.open({
 			minChunkSize: 1 * GB,
 		}),
 		headerhash: HashMapStore.open({
-			commiter: self.name === "chain",
 			path: join(BASE_DATA_DIR, "headerhash"),
 			loadFactor: LOAD_FACTOR_OPTIONS,
 			entries: {
@@ -70,7 +69,6 @@ export const manifest = Manifest.open({
 			restore: { windowLogMax: 27 },
 		}),
 		txid: HashMapStore.open({
-			commiter: self.name === "chain",
 			path: join(BASE_DATA_DIR, "txid"),
 			loadFactor: LOAD_FACTOR_OPTIONS,
 			entries: {
@@ -90,7 +88,6 @@ export const manifest = Manifest.open({
 			sha256: true,
 		}),
 		pubkey: HashMapStore.open({
-			commiter: self.name === "chain",
 			path: join(BASE_DATA_DIR, "pubkey"),
 			loadFactor: LOAD_FACTOR_OPTIONS,
 			entries: {
@@ -111,7 +108,6 @@ export const manifest = Manifest.open({
 			sha256: true,
 		}),
 		output: SharedArrayStore.open({
-			writable: self.name === "chain",
 			path: join(BASE_DATA_DIR, "output"),
 			item: new StructCodec({
 				ownerTx: StoredTxIdIndex,

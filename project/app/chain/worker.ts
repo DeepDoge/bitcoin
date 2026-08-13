@@ -1,22 +1,15 @@
-import { Codec } from "@nomadshiba/codec";
 import { equals } from "@std/bytes";
 import { delay } from "@std/async";
 import { manifest } from "~/chain/manifest.ts";
 import { GENESIS_BLOCK_HASH, GENESIS_BLOCK_HEADER_DECODED } from "~/chain/genesis.ts";
-import { BIP30_EXCEPTION_BLOCKS, isBip30Exception } from "~/chain/bips/bip30.ts";
-import { checkBip34CoinbaseHeight } from "~/chain/bips/bip34.ts";
-import { StoredPrevOutTxId } from "@project/codecs";
-import { StoredTx } from "@project/codecs";
-import { StoredTxInput } from "@project/codecs";
-import { StoredTxOutput } from "@project/codecs";
-import { WireTxs } from "@project/codecs";
-import { COINBASE_TXID, MAX_BLOCK_SIZE } from "@project/utils";
+import type { CommittedResult, ConsumeRequest, ConsumeResult, DecodedResult, WorkerMessage } from "~/chain/consume.protocol.ts";
+
 import { verifyProofOfWork, workFromHeader } from "@project/bitcoin";
 import { Queue } from "@project/collections";
-import { HashMapStore } from "~/libs/storage/HashMapStore.ts";
 import { MessagePortLike } from "@project/message";
 import { WireBlockHeader } from "@project/codecs";
 import { WireBlockHeaders } from "@project/codecs";
+import { PARALLELISM_THREADS } from "~/env.ts";
 
 console.log("[chain] booting");
 
@@ -30,35 +23,47 @@ const p2pMessageQueue = new Queue<{ type: string; data: any }>(1000);
 const chunkQueue = new Queue<Uint8Array>(256);
 
 // ── blocks/s throughput ──────────────────────────────────────────────────────
-// Two views: `window` blocks since the last report (instantaneous rate) and a
-// running total since boot (average rate). Reported at most once per interval.
 const RATE_REPORT_INTERVAL_MS = 2_000;
 const bootAt = performance.now();
 let totalBlocks = 0;
 let windowBlocks = 0;
 let lastReportAt = bootAt;
+let windowChunksUsed = 0;
+let windowCommitMs = 0;
+let windowGapMs = 0;
+let windowCommitSamples = 0;
+let lastCommitEndAt = bootAt;
 
-/** Record `n` freshly-committed blocks and log blocks/s once per interval. */
-function recordBlocks(n: number, tipHeight: number): void {
+function recordBlocks(n: number, tipHeight: number, chunksUsed: number, nWorkers: number, commitMs: number, gapMs: number): void {
 	totalBlocks += n;
 	windowBlocks += n;
+	windowChunksUsed += chunksUsed;
+	windowCommitMs += commitMs;
+	windowGapMs += gapMs;
+	windowCommitSamples += 1;
 	const now = performance.now();
 	const windowMs = now - lastReportAt;
 	if (windowMs < RATE_REPORT_INTERVAL_MS) return;
 	const windowRate = windowBlocks / (windowMs / 1000);
 	const avgRate = totalBlocks / ((now - bootAt) / 1000);
+	const avgChunks = windowCommitSamples > 0 ? windowChunksUsed / windowCommitSamples : 0;
+	const avgCommitMs = windowCommitSamples > 0 ? windowCommitMs / windowCommitSamples : 0;
+	const avgGapMs = windowCommitSamples > 0 ? windowGapMs / windowCommitSamples : 0;
+	const dutyCycle = windowCommitMs + windowGapMs > 0 ? (windowCommitMs / (windowCommitMs + windowGapMs)) * 100 : 0;
 	console.log(
-		`[chain] ${windowRate.toFixed(0)} blocks/s (avg ${avgRate.toFixed(0)}/s) height=${tipHeight} total=${totalBlocks}`,
+		`[chain] ${windowRate.toFixed(0)} blocks/s (avg ${avgRate.toFixed(0)}/s) height=${tipHeight} total=${totalBlocks} chunks=${
+			avgChunks.toFixed(1)
+		}/${nWorkers} commit=${avgCommitMs.toFixed(1)}ms gap=${avgGapMs.toFixed(1)}ms duty=${dutyCycle.toFixed(0)}%`,
 	);
 	windowBlocks = 0;
+	windowChunksUsed = 0;
+	windowCommitMs = 0;
+	windowGapMs = 0;
+	windowCommitSamples = 0;
 	lastReportAt = now;
 }
 
 // ── header chain (this worker owns the writes now) ────────────────────────────
-// p2p forwards raw headers it fetched from peers; this worker validates, applies
-// the most-work rule, writes header + blockhash mmap, and pins. p2p reads the
-// same mmap to build locators and drive block download. Reads up to size() here
-// are always this worker's own committed writes.
 
 function tipHeight(): number {
 	return manifest.stores.header.size() - 1;
@@ -77,12 +82,6 @@ function tipHash(): Uint8Array | undefined {
 	return height < 0 ? undefined : headerHashAt(height);
 }
 
-/**
- * hash -> height, VERIFIED against the header store. A reorg leaves stale
- * blockhash rows for orphaned headers (the hashmap has no delete); this check —
- * "does the header now sitting at that height still have this hash?" — makes
- * every such stale row read back as unknown. Self-healing, no cleanup pass.
- */
 function heightOfHash(hash: Uint8Array): number | undefined {
 	const height = manifest.stores.headerhash.get(hash);
 	if (height === undefined) return undefined;
@@ -90,49 +89,29 @@ function heightOfHash(hash: Uint8Array): number | undefined {
 	return at && equals(at, hash) ? height : undefined;
 }
 
-/** Outcome of applying a batch: how many headers adopted, and — on a reorg that
- * drops below already-downloaded bodies — the split height p2p must rewind its
- * download cursor to. rewind is only set when p2p needs to act on it. */
 type ApplyResult = { adopted: number; rewind?: number };
 
-/**
- * Adopt a peer's header branch iff it out-works ours (most-work rule):
- *   1. find where their branch attaches to our chain (split point).
- *   2. validate the incoming branch (links + PoW) and sum its work.
- *   3. sum OUR work above the same split. Shared prefix cancels — branch work
- *      alone decides it.
- *   4. if the peer's branch strictly out-works ours, drop to the split and
- *      append it; otherwise keep ours.
- *
- * Pins on adoption. Returns how many headers we adopted (0 = kept ours) plus a
- * rewind height when a reorg invalidated already-downloaded block bodies.
- */
 function applyHeaders(headers: WireBlockHeader[]): ApplyResult {
 	const head = headers[0];
 	if (!head) return { adopted: 0 };
 
-	// The header chain is never empty in normal operation — main seeds + pins
-	// genesis before spawning workers, and recover() reveals it at import. Bail
-	// rather than dereferencing a -1 tip if we're somehow called early.
 	const tip = tipHash();
 	if (tip === undefined) return { adopted: 0 };
 
-	// 1. split point
 	let splitHeight: number;
 	if (equals(head.prevHash, tip)) {
-		splitHeight = tipHeight(); // plain extension
+		splitHeight = tipHeight();
 	} else {
 		const forked = heightOfHash(head.prevHash);
-		if (forked === undefined) return { adopted: 0 }; // attaches to nothing we know
+		if (forked === undefined) return { adopted: 0 };
 		splitHeight = forked;
 	}
 
-	// 2. validate the incoming branch, sum its work
 	const branch: WireBlockHeader[] = [];
-	let prevHash = headerHashAt(splitHeight)!; // == head.prevHash
+	let prevHash = headerHashAt(splitHeight)!;
 	let branchWork = 0n;
 	for (const header of headers) {
-		if (!equals(header.prevHash, prevHash)) break; // stop at first non-link
+		if (!equals(header.prevHash, prevHash)) break;
 		if (!verifyProofOfWork(header)) break;
 		branch.push(header);
 		branchWork += workFromHeader(header);
@@ -140,25 +119,18 @@ function applyHeaders(headers: WireBlockHeader[]): ApplyResult {
 	}
 	if (branch.length === 0) return { adopted: 0 };
 
-	// 3. our work above the same split (empty for a plain extension)
 	const currentTip = tipHeight();
 	let ourWork = 0n;
 	for (let h = splitHeight + 1; h <= currentTip; h++) ourWork += workFromHeader(headerAt(h)!);
 
-	// 4. most-work rule — only switch on a strict win
 	const isReorg = splitHeight < currentTip;
 	if (isReorg && branchWork <= ourWork) return { adopted: 0 };
 
 	let rewind: number | undefined;
 	if (isReorg) {
 		console.log(`[chain] header reorg: dropping height ${tipHeight()} -> ${splitHeight}, applying ${branch.length} headers`);
-		manifest.stores.header.truncate(splitHeight + 1); // reveal is forward-only; shrinking needs truncate. stale blockhash rows self-heal via heightOfHash
+		manifest.stores.header.truncate(splitHeight + 1);
 
-		// A reorg below where block bodies were already committed means those
-		// bodies are now orphaned and the block/tx/txid/pubkey/spender domain must
-		// be rewound too. That reverse-replay is NOT implemented yet — throw rather
-		// than silently serve an inconsistent chain. For IBD off a trusted peer
-		// this never fires. Header-only reorgs above the block tip are fine.
 		if (splitHeight < manifest.stores.block.size() - 1) {
 			throw new Error(
 				`header reorg to ${splitHeight} is below committed block tip ${manifest.stores.block.size() - 1}; ` +
@@ -166,14 +138,12 @@ function applyHeaders(headers: WireBlockHeader[]): ApplyResult {
 			);
 		}
 
-		// Tell p2p to pull its download cursor back to the split and refetch.
 		rewind = splitHeight;
 	}
 
 	for (const header of branch) {
 		const height = manifest.stores.header.stage(header);
 		manifest.stores.header.reveal(height + 1);
-
 		manifest.stores.headerhash.put(header.hash(), height);
 	}
 	manifest.pin();
@@ -200,20 +170,14 @@ self.onmessage = async (event) => {
 			archive: {
 				compressionLevel: 19,
 				enableLongDistanceMatching: 1,
-				windowLog: 27, // maybe make it 24 later?
-				checksumFlag: 1, // 4-byte frame checksum, cheap integrity guard
-				contentSizeFlag: 1, // size in frame header — works on the sync path,
+				windowLog: 27,
+				checksumFlag: 1,
+				contentSizeFlag: 1,
 			},
 		},
 	});
 
-	while (true) {
-		try {
-			await tick(port);
-		} catch (error) {
-			console.error("[chain] tick error:", error);
-		}
-	}
+	await startConsumePipeline(port);
 };
 
 self.onunhandledrejection = (e) => {
@@ -225,290 +189,202 @@ self.postMessage(null);
 function prepare(port: MessagePortLike): void {
 	port.addEventListener("message", (event) => p2pMessageQueue.enqueue(event.data));
 
-	// Tell p2p where our block bodies end so it downloads from the next height.
-	// Headers now flow the other way too: p2p fetches them and forwards raw
-	// batches here (type "headers"); this worker applies + pins them and acks.
 	const target = manifest.stores.block.size() - 1;
 	console.log(`[chain] sync port received, blocks committed up to height ${target}, requesting from p2p`);
 	port.postMessage({ type: "seek", data: target });
 	port.postMessage({ type: "start" });
 }
 
-async function tick(port: MessagePortLike): Promise<void> {
-	const message = p2pMessageQueue.dequeue();
-	if (!message) {
-		if (chunkQueue.size() > 0) {
-			await consumeChunks(port);
-		} else {
-			await delay(1); // nothing to do — don't peg the core
-		}
-		return;
-	}
-
-	if (message.type === "blocks") {
-		if (!chunkQueue.enqueue(message.data as Uint8Array)) {
-			console.error("[chain] chunkQueue overflow — p2p backpressure is not holding");
-			Deno.kill(Deno.pid);
-		}
-		await consumeChunks(port);
-		return;
-	}
-
-	if (message.type === "headers") {
-		// p2p fetched these from a peer and forwarded the raw batch. We own the
-		// header writes now: validate + apply the most-work rule + pin, then ack
-		// so p2p knows the new tip is durably readable before it builds its next
-		// locator. The ack carries the adoption count (0 = p2p stops asking this
-		// peer) and, on a reorg, the height p2p must rewind its download to.
-		const [headers] = WireBlockHeaders.decode(message.data as Uint8Array);
-		let result: ApplyResult;
-		try {
-			result = applyHeaders(headers);
-		} catch (reason) {
-			console.error("[chain] applyHeaders failed:", reason);
-			Deno.kill(Deno.pid);
-			return;
-		}
-		port.postMessage({ type: "headers-applied", data: result });
-		return;
-	}
-}
-
-/**
- * Append a (key, value) to a HashMapStore and return its entry index.
- *
- * `put` writes the entry, links it into the per-worker staged index, and
- * advances the cursor — all internally. The returned index is the stable
- * reference we store elsewhere (in outputs, prevOuts, etc).
- */
-function putEntry<K extends Codec, V extends Codec>(
-	store: HashMapStore<K, V>,
-	key: Codec.InferInput<K>,
-	value: Codec.InferInput<V>,
-): number {
-	return store.put(key, value);
-}
-
-/**
- * Consume exactly one downloaded chunk (many blocks, raw WireTxs back to back),
- * write its txs + indexes, commit, and ack p2p so it can release backpressure.
- *
- * TEMP: single-threaded and sequential — the parallel consume/spender pipeline
- * is deliberately not wired in yet. The goal here is a correct, functional loop
- * on the mmap storage; parallelism (and encoding straight into the mmap) comes
- * back on top of this.
- */
-async function consumeChunks(port: MessagePortLike): Promise<void> {
-	try {
-		const chunk = chunkQueue.dequeue();
-		if (!chunk) return;
-
-		const txStore = manifest.stores.tx;
-		const output = manifest.stores.output;
-		// tx is a raw BlobStore. stage() fills bytes AHEAD of the cursor without
-		// moving it, so we track the offset ourselves and advance the cursor once
-		// at the end (see the reveal() below). Start at the next slot.
-		let txPointer = txStore.next(MAX_BLOCK_SIZE);
-
-		// Running global output count. Seeded from output's COMMITTED size (the
-		// number of output slots pinned by prior chunks) and advanced per tx as we
-		// go — the in-memory base each tx's outputs start at, no store read. Each
-		// tx records this base as firstOutputHeight in its txid entry so a later
-		// spend recovers any output's global height as firstOutputHeight + vout.
-		// (Under parallel consume this is exactly the per-range base a worker keeps
-		// in memory, seeded from the previous range's completion checkpoint.)
-		let total = output.size();
-
-		// Outputs created earlier in THIS chunk are staged (written via set())
-		// but not yet revealed — output.get() bounds-checks against the revealed
-		// cursor, so a spend of a same-chunk output would throw RangeError. Keep
-		// an in-memory overlay of everything staged this chunk and consult it
-		// first. (Same-block and same-chunk spends do happen on mainnet.) Spends
-		// write live to the store as before; crash rollback of uncommitted spends
-		// is handled by manifest.beforeRecovery at open time.
-		const stagedOutputs = new Map<number, Codec.InferOutput<typeof output.item>>();
-
-		let blocksInChunk = 0;
-		let offset = 0;
-		while (offset < chunk.length) {
-			const [block, size] = WireTxs.decode(chunk.subarray(offset));
-			offset += size;
-			blocksInChunk++;
-
-			// Align to a block slot: next() bumps us to the next chunk if this one
-			// has less than a max block left, so the whole block region (count +
-			// every tx) lands contiguously in one chunk — no straddle.
-			txPointer = txStore.next(MAX_BLOCK_SIZE, txPointer);
-			// This reservation covers the WHOLE block, once — not a fresh
-			// MAX_BLOCK_SIZE for every tx inside it. blockRegionEnd is the actual
-			// boundary that reservation bought us; each tx below asks for what's
-			// left of it, not the full amount again.
-			const blockRegionEnd = txPointer + MAX_BLOCK_SIZE;
-
-			// The height of THIS block is the next free block-store slot (block[i]
-			// is the block at height i; genesis is pre-seeded at 0 by the header
-			// domain but bodies start after it, so block.size() == the height we're
-			// about to write). Captured before stage() for the consensus checks.
-			const height = manifest.stores.block.size();
-
-			// BIP34: from height 227931 the coinbase scriptSig must start with the
-			// serialized block height. The coinbase is always the block's first tx.
-			const coinbase = block[0];
-			if (coinbase) checkBip34CoinbaseHeight(height, coinbase.inputs[0]?.scriptSig ?? new Uint8Array(0));
-
-			// BIP30: is this one of the two historical blocks allowed to overwrite
-			// an earlier identical coinbase txid? Only ever possible at two known
-			// heights, so skip the (per-block) header hash recompute otherwise, and
-			// verify against the stored header hash so we can't be tricked into
-			// overwriting on the wrong chain.
-			const bip30Overwrite = BIP30_EXCEPTION_BLOCKS.has(height) &&
-				isBip30Exception(height, manifest.stores.header.get(height)?.hash() ?? new Uint8Array(0));
-
-			// block[height] -> pointer to this block's first tx entry.
-			manifest.stores.block.stage({
-				txPointer,
-				wireSize: size + WireBlockHeader.stride.size,
-				txCount: block.length,
-				reward: 123_456_789, // TODO: calculate later.
-			}, height);
-			manifest.stores.block.reveal(height + 1);
-
-			for (const tx of block) {
-				// This tx's outputs occupy [total, total + outputs.length) in global
-				// output-height space. Recorded as firstOutputHeight in the txid entry
-				// so a spend of any of them resolves height via one txid lookup.
-				const totalOutput = total;
-
-				// BIP30 duplicate-txid handling. The store has no in-place update or
-				// delete, but commit() prepends fresh entries to their bucket head
-				// (and our per-worker stage overwrites the staged index), so simply
-				// appending a new entry for a duplicate txid makes it win every
-				// read — exactly the OVERWRITE Core does for the two exception
-				// blocks. For every other block BIP34 guarantees uniqueness, so a
-				// duplicate never legitimately happens here.
-				if (bip30Overwrite && manifest.stores.txid.getIndex(tx.txId) !== undefined) {
-					console.log(`[chain] BIP30 overwrite of duplicate coinbase txid at height ${height}`);
-				}
-				const txIdIndex = putEntry(manifest.stores.txid, tx.txId, { totalOutput, txPointer });
-
-				const storedTx: Codec.InferInput<typeof StoredTx> = {
-					lockTimeAndVersionPack: { locktime: tx.locktime, version: tx.version },
-					inputs: tx.inputs.map((input, index): Codec.InferInput<typeof StoredTxInput> => {
-						let prevOutTxId: Codec.InferInput<typeof StoredPrevOutTxId>;
-						if (equals(input.prevOut.txId, COINBASE_TXID)) {
-							prevOutTxId = null;
-						} else {
-							// One txid lookup gives both the prevout's entry index (what we
-							// store as prevOutTxId) and its value — which now carries the
-							// prevout tx's firstOutputHeight, so the spent output's global
-							// height is firstOutputHeight + vout with no blob read.
-							const resolved = manifest.stores.txid.getValueAndIndex(input.prevOut.txId);
-							if (resolved === undefined) {
-								throw new Error("prevOut references a txid not present in the index");
-							}
-							const [prevValue, prevEntryIndex] = resolved;
-							const prevOutputIndex = prevValue.totalOutput + input.prevOut.output;
-							// Read the output slot: spenderTx === null means unspent.
-							// A non-null spenderTx means this output was already spent ->
-							// double spend. (Off a trusted IBD peer this never fires,
-							// like the reorg guard; it's the check.) Same-chunk outputs
-							// come from the staged overlay (see above), the rest from
-							// the store.
-							const existing = stagedOutputs.get(prevOutputIndex) ?? output.get(prevOutputIndex);
-							if (existing.spenderTx !== null) {
-								throw new Error(`double spend: output ${prevOutputIndex} already spent`);
-							}
-							// Buffer the spend in the overlay ONLY — never write
-							// spenderTx to the live store during the chunk. A crash
-							// before pin() would leave a durable spend mark on an
-							// already-revealed slot (mmap writes survive SIGKILL)
-							// that cursor-rollback can't undo and beforeRecovery
-							// can't see (the block was never pinned, so its tx data
-							// is cursor-locked on restart). Spends flush after pin().
-							stagedOutputs.set(prevOutputIndex, { ...existing, spenderTx: txIdIndex });
-							prevOutTxId = prevEntryIndex;
-						}
-
-						return {
-							prevOut: { txId: prevOutTxId, output: input.prevOut.output },
-							scriptSig: input.scriptSig,
-							sequence: input.sequence,
-							witness: tx.witness[index] ?? [],
-						};
-					}),
-					outputs: tx.outputs.map((output): Codec.InferInput<typeof StoredTxOutput> => {
-						// The pubkey store dedups scripts: each distinct scriptPubKey is
-						// stored ONCE and its entry index is the stable reference we hand
-						// out. First sighting -> put it (value = this tx's index). Reuse ->
-						// keep the existing index.
-					const pubkeyResult = manifest.stores.pubkey.getValueAndIndex(output.scriptPubKey);
-					if (!pubkeyResult) {
-						const pubKeyIndex = putEntry(manifest.stores.pubkey, output.scriptPubKey, txIdIndex);
-						return {
-							value: Number(output.value),
-							scriptPubKey: pubKeyIndex,
-						};
-					}
-					const [, pubKeyIndex] = pubkeyResult;
-					return {
-						value: Number(output.value),
-						scriptPubKey: pubKeyIndex,
-					};
-				}),
-				};
-
-				// This tx's outputs are now accounted for — advance the global base.
-				// Create an output slot for each output: ownerTx = this tx's index,
-				// spenderTx = null (unspent), prevSamePubkeyOutputIndex = null.
-				// Creations land BEYOND the revealed cursor, so a crash before pin
-				// just hides them via cursor rollback — safe to write now (and the
-				// overlay needs them so a later same-chunk spend resolves them).
-				for (let i = 0; i < tx.outputs.length; i++) {
-					const created = { ownerTx: txIdIndex, spenderTx: null, prevSamePubkeyOutputIndex: null };
-					stagedOutputs.set(total + i, created);
-					output.set(total + i, created);
-				}
-				total += tx.outputs.length;
-
-				// The block-level next(MAX_BLOCK_SIZE, ...) above reserves room for the
-				// whole block up front, once — blockRegionEnd is that reservation's real
-				// boundary. Each tx write asks for what's LEFT of the block's budget
-				// (blockRegionEnd - txStoreOffset), not a fresh MAX_BLOCK_SIZE every
-				// time — asking for the full amount on every tx demanded room the
-				// reservation never promised past the first tx, and threw spuriously
-				// partway through any block that used more than a sliver of its budget.
-				// If the block's actual total size ever exceeds what was reserved, this
-				// still throws — correctly, right here — instead of silently truncating
-				// the tx into whatever chunk space happened to remain, which is what
-				// was producing the corrupted, permanently-broken coinbase reads
-				// downstream.
-				txPointer += StoredTx.encodeInto(storedTx, txStore.mmap(blockRegionEnd - txPointer, txPointer));
+/** Drain p2p messages. Headers are handled inline (cheap, p2p blocks on the ack);
+ * blocks are enqueued for the pipeline. Returns when the queue is empty. */
+async function drainP2P(port: MessagePortLike): Promise<void> {
+	while (true) {
+		const message = p2pMessageQueue.dequeue();
+		if (!message) return;
+		if (message.type === "blocks") {
+			if (!chunkQueue.enqueue(message.data as Uint8Array)) {
+				console.error("[chain] chunkQueue overflow — p2p backpressure is not holding");
+				Deno.kill(Deno.pid);
+			}
+		} else if (message.type === "headers") {
+			const [headers] = WireBlockHeaders.decode(message.data as Uint8Array);
+			try {
+				const result = applyHeaders(headers);
+				port.postMessage({ type: "headers-applied", data: result });
+			} catch (reason) {
+				console.error("[chain] applyHeaders failed:", reason);
+				Deno.kill(Deno.pid);
 			}
 		}
+	}
+}
 
-		// Commit the tx blob: advance its cursor past everything we wrote so the
-		// bytes become live/readable (the txid pointers we stored point into this
-		// range). Extend the output array to cover every output created this chunk
-		// (new slots read 0 = unspent). Then pin OUR domain only — one consistent
-		// snapshot per round.
-		txStore.reveal(txPointer);
-		output.reveal(total);
-		manifest.pin();
+// ── pipelined consume worker pool ─────────────────────────────────────────────
+//
+// Long-lived consumer workers (one per parallelism thread). Each holds read-
+// only handles to the shared mmap stores — they see committed data live via
+// the shared CURSOR mmaps without any RPC. Spawned lazily on first use; reused
+// for the lifetime of the worker.
+//
+// Pipeline (real, not rounds): each worker is an independent state machine
+// FREE → DECODING → DECODED(waiting turn) → COMMITTING → FREE. Decode dispatch
+// is gated ONLY on "a chunk is queued AND a worker is FREE" — never on commits
+// finishing — so stage 1 (the sha256d-heavy decode) stays saturated. Commit
+// runs strictly in chunk-sequence order: chunk K's commit turn is granted only
+// after chunk K-1 is committed + pinned, so the live store values ARE the
+// correct bases — no negotiation, no cross-worker maps, no scratch.
 
-		// Spends were buffered in the overlay all chunk (never written live, so a
-		// crash before pin can't leave a durable spend mark on an already-revealed
-		// slot). Now that pin() has durably committed, flush them: any crash from
-		// here restarts from this pin and reprocessing only happens for blocks
-		// AFTER this one. A crash between pin() and this flush drops some spend
-		// marks (benign UTXO leak), never a false double-spend.
-		for (const [index, value] of stagedOutputs) output.set(index, value);
+const consumeWorkerUrl = new URL("./consume.worker.ts", import.meta.url);
+const consumeWorkers: Worker[] = [];
 
-		recordBlocks(blocksInChunk, manifest.stores.block.size() - 1);
+async function ensureConsumeWorkers(): Promise<void> {
+	if (consumeWorkers.length > 0) return;
+	const n = Math.max(1, PARALLELISM_THREADS);
+	console.log(`[chain] spawning ${n} consume workers`);
+	const readyPromises: Promise<void>[] = [];
+	for (let i = 0; i < n; i++) {
+		const w = new Worker(consumeWorkerUrl, { type: "module", name: `consumer-${i}` });
+		const ready = new Promise<void>((resolve, reject) => {
+			const onMessage = (event: MessageEvent<WorkerMessage>) => {
+				const msg = event.data;
+				if (msg.type === "ready") {
+					w.removeEventListener("message", onMessage);
+					resolve();
+				} else if (msg.type === "error") {
+					w.removeEventListener("message", onMessage);
+					reject(new Error(`${msg.phase}: ${msg.message}`));
+				}
+			};
+			w.addEventListener("message", onMessage);
+			w.addEventListener("error", (e) => reject(new Error((e as ErrorEvent).message)));
+		});
+		consumeWorkers.push(w);
+		readyPromises.push(ready);
+	}
+	await Promise.all(readyPromises);
+	console.log(`[chain] all consume workers ready`);
+}
 
-		// Ack so p2p's postedChunks - consumedChunks backpressure can drain.
-		port.postMessage({ type: "consume" });
-	} catch (reason) {
-		console.error(`[chain] consumeChunks:`, reason);
-		Deno.kill(Deno.pid);
+/** Send a request to a worker and await its result (one in-flight per worker). */
+function workerRound(w: Worker, req: ConsumeRequest): Promise<ConsumeResult> {
+	return new Promise((resolve, reject) => {
+		const onMessage = (event: MessageEvent<WorkerMessage>) => {
+			const msg = event.data;
+			if (msg.type === "error") {
+				w.removeEventListener("message", onMessage);
+				reject(new Error(`${msg.phase}: ${msg.message}`));
+				return;
+			}
+			if (msg.type === "decoded" || msg.type === "committed") {
+				w.removeEventListener("message", onMessage);
+				resolve(msg);
+				return;
+			}
+		};
+		w.addEventListener("message", onMessage);
+		w.addEventListener("error", (e) => {
+			w.removeEventListener("message", onMessage);
+			reject(new Error((e as ErrorEvent).message));
+		});
+		w.postMessage(req);
+	});
+}
+
+type Slot = {
+	worker: Worker;
+	busy: boolean;
+	seq: number;
+	decode: Promise<DecodedResult> | null;
+};
+
+/**
+ * The pipeline driver — runs forever once started. Each iteration either
+ * dispatches a decode to a free worker (non-blocking) or commits the chunk
+ * whose turn has come (blocking, in order). The call to dispatch() BETWEEN
+ * awaiting decode and awaiting commit is what makes this a real pipeline:
+ * free workers refill their decode stage while some worker is busy
+ * committing, so stage 1 stays saturated.
+ *
+ * The committing worker writes everything itself, straight into the shared
+ * mmaps — chain's only remaining jobs per chunk are handing out the commit
+ * turn and calling manifest.pin(), the durable checkpoint (crash recovery +
+ * frontend/API boundary), which has nothing to do with cross-worker
+ * visibility anymore.
+ */
+async function startConsumePipeline(port: MessagePortLike): Promise<void> {
+	await ensureConsumeWorkers();
+	const nWorkers = consumeWorkers.length;
+
+	const slots: Slot[] = consumeWorkers.map((w) => ({ worker: w, busy: false, seq: 0, decode: null }));
+	let nextDispatchSeq = 0;
+	let nextCommitSeq = 0;
+
+	/** Non-blocking: hand a chunk to every free worker that can get one. */
+	const dispatch = (): void => {
+		for (const slot of slots) {
+			if (slot.busy) continue;
+			const chunk = chunkQueue.dequeue();
+			if (!chunk) break;
+			slot.busy = true;
+			slot.seq = nextDispatchSeq++;
+			slot.decode = workerRound(slot.worker, { type: "decode", chunk }) as Promise<DecodedResult>;
+		}
+	};
+
+	const blockStore = manifest.stores.block;
+
+	while (true) {
+		try {
+			// Drain p2p messages so chunks posted between iterations land in
+			// chunkQueue before dispatch.
+			await drainP2P(port);
+
+			// Top up free workers with new decode work.
+			dispatch();
+
+			// Find the chunk whose commit turn has come (oldest in-flight).
+			const slot = slots.find((s) => s.busy && s.seq === nextCommitSeq);
+			if (!slot || !slot.decode) {
+				// Nothing ready to commit yet — either all workers are free
+				// (no chunks queued) or the next-in-line is still decoding.
+				await delay(1);
+				continue;
+			}
+
+			// Await the decode result for this chunk.
+			await slot.decode;
+
+			// CRITICAL: refill free workers BEFORE awaiting commit. This is the
+			// only line that makes the pipeline real — while this worker
+			// commits chunk K, other workers decode chunks K+1, K+2, ...
+			await drainP2P(port);
+			dispatch();
+
+			const commitStart = performance.now();
+			const gapMs = commitStart - lastCommitEndAt;
+
+			const res = await workerRound(slot.worker, { type: "commit" }) as CommittedResult;
+
+			// Durable checkpoint. The worker already wrote everything (tx
+			// bytes, txid/pubkey entries, output rows, block records) straight
+			// into the shared mmaps, visible to every other worker already —
+			// pin() just fsyncs and records the recovery boundary.
+			manifest.pin();
+
+			// Ack p2p — one per chunk consumed, so its postedChunks-consumedChunks
+			// backpressure can drain at the same rate we commit.
+			port.postMessage({ type: "consume" });
+
+			const commitMs = performance.now() - commitStart;
+			lastCommitEndAt = performance.now();
+			recordBlocks(res.blockCount, blockStore.size() - 1, 1, nWorkers, commitMs, gapMs);
+
+			slot.busy = false;
+			slot.decode = null;
+			nextCommitSeq++;
+		} catch (reason) {
+			console.error(`[chain] pipeline error:`, reason);
+			Deno.kill(Deno.pid);
+		}
 	}
 }

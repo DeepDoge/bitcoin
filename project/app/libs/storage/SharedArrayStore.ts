@@ -8,16 +8,22 @@ const BUSY = 255; // version 255 = a writer is mid-write; clean generations are 
 
 export type SharedArrayStoreOptions<T extends FixedCodec> = {
 	path: string;
-	writable: boolean;
 	minChunkSize: number;
 	item: T;
 };
 
 type Chunk = { mapping: Mmap; bytes: Uint8Array };
 
+// Every opener maps every file read-write. There is never more than one active
+// writer at a time (the pipeline's own scheduling guarantees that — only one
+// commit is ever in flight across the whole worker pool), and a read-only
+// mapping bought no safety anyway: mmap here is always MAP_SHARED (see
+// @nomadshiba/mmap), so a "read-only" mapping is backed by the exact same
+// physical pages a writer mutates — `writable: false` only made this process's
+// own accidental writes segfault, it did nothing for torn-read protection
+// (that's what the version-byte seqlock in get()/set() is for, unconditionally).
 export class SharedArrayStore<T extends FixedCodec> extends Store implements Disposable {
 	public readonly path: string;
-	public readonly writable: boolean;
 	public readonly item: T;
 	public readonly slotStride: number; // version(1) + payload
 	public readonly chunkSize: number;
@@ -35,14 +41,13 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	private constructor(options: SharedArrayStoreOptions<T>) {
 		super();
 		this.path = options.path;
-		this.writable = options.writable;
 		this.item = options.item;
 		this.slotStride = VERSION_BYTES + options.item.stride.size;
 		this.chunkSize = Math.ceil(options.minChunkSize / this.slotStride) * this.slotStride;
 		this.slotsPerChunk = this.chunkSize / this.slotStride;
 		this.scratch = new Uint8Array(options.item.stride.size);
 
-		if (this.writable) Deno.mkdirSync(this.path, { recursive: true });
+		Deno.mkdirSync(this.path, { recursive: true });
 		this.cursorMmap = this.openFile(join(this.path, "CURSOR"), BigUint64Array.BYTES_PER_ELEMENT);
 		this.cursor = new BigUint64Array(this.cursorMmap.buffer(), 0, 1);
 	}
@@ -56,7 +61,7 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	}
 
 	private openFile(file: string, bytes: number): Mmap {
-		return Mmap.openSync(file, { write: this.writable, ensureFileSize: bytes });
+		return Mmap.openSync(file, { write: true, ensureFileSize: bytes });
 	}
 
 	private chunk(chunkIndex: number): Chunk {
@@ -74,7 +79,6 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	}
 
 	public override truncate(size: number): void {
-		if (!this.writable) throw new Error("SharedArrayStore is read-only");
 		if (size > this.size()) {
 			throw new RangeError(`truncate size=${size} is after the cursor (size=${this.size()}); truncate only moves backwards`);
 		}
@@ -82,11 +86,6 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	}
 
 	public override reveal(size: number): void {
-		// Readers observe the writer's cursor directly through the shared mapping,
-		// which is always at or ahead of the last pinned broadcast. A broadcast
-		// arriving "behind" is therefore expected — the reader is already caught
-		// up — so readers treat reveal as a no-op rather than throwing.
-		if (!this.writable) return;
 		if (size < this.size()) {
 			throw new RangeError(`reveal size=${size} is behind the cursor (size=${this.size()}); reveal only moves forward`);
 		}
@@ -94,7 +93,6 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 	}
 
 	public set(index: number, value: Codec.InferInput<T>): void {
-		if (!this.writable) throw new Error("SharedArrayStore is read-only");
 		const local = index % this.slotsPerChunk;
 		const chunk = this.chunk((index - local) / this.slotsPerChunk);
 		const versionOffset = local * this.slotStride;

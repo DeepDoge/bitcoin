@@ -38,8 +38,8 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 		return this.blob.size() / this.item.stride.size;
 	}
 
-	public reveal(size: number, isBroadcast?: boolean): void {
-		return this.blob.reveal(size * this.item.stride.size, isBroadcast);
+	public reveal(size: number): void {
+		return this.blob.reveal(size * this.item.stride.size);
 	}
 
 	public truncate(size: number): void {

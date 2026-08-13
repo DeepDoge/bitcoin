@@ -10,7 +10,6 @@ import { sha256 } from "@noble/hashes/sha2";
 
 export type LoadFactorOptions = { target: number; maxDrift: number };
 export type HashMapStoreOptions<Key extends Codec, Value extends Codec> = {
-	commiter: boolean;
 	path: string;
 
 	loadFactor: LoadFactorOptions;
@@ -32,6 +31,14 @@ export type HashMapStoreOptions<Key extends Codec, Value extends Codec> = {
 	sha256?: boolean;
 };
 
+// There is only ever one active writer at a time across the whole worker
+// pool (the pipeline hands out an exclusive "commit" turn, never two at
+// once), so every opener can safely write. reveal() wires buckets straight
+// into the real, shared SharedArrayStore the moment it runs — every other
+// worker sees it immediately through the page cache, no staging, no
+// broadcast, no separate "commit" step. sync() is durability only (msync);
+// pin() (in Manifest) is the durable checkpoint used for crash recovery and
+// nothing to do with cross-worker visibility.
 export class HashMapStore<Key extends Codec, Value extends Codec> extends Store implements Disposable {
 	public readonly path: string;
 
@@ -44,17 +51,12 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	private sha256Scratch2: Uint8Array<ArrayBuffer>;
 	private keyScratch: Uint8Array<ArrayBuffer>;
 
-	private maxEntrySize: number;
+	public readonly maxEntrySize: number;
 	private loadFactor: LoadFactorOptions;
 
-	private buckets: SharedArrayStore<NullableNumaricCodec<FixedCodec<number>>>;
-	private links: SharedArrayStore<StructCodec<{ prevIndex: NullableNumaricCodec<FixedCodec<number>>; entryPointer: FixedCodec<number> }>>;
-	private entries: BlobStore;
-
-	private commiter: boolean;
-	private stagedBuckets: Map<number, number>;
-
-	private lockFile: Deno.FsFile | null;
+	public readonly buckets: SharedArrayStore<NullableNumaricCodec<FixedCodec<number>>>;
+	public readonly links: SharedArrayStore<StructCodec<{ prevIndex: NullableNumaricCodec<FixedCodec<number>>; entryPointer: FixedCodec<number> }>>;
+	public readonly entries: BlobStore;
 
 	private constructor(options: HashMapStoreOptions<Key, Value>) {
 		super();
@@ -70,29 +72,14 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 
 		this.maxEntrySize = options.entries.maxEntrySize ?? this.entry.stride.size!;
 		this.loadFactor = options.loadFactor;
-		this.commiter = options.commiter;
-		this.stagedBuckets = new Map();
-
-		this.lockFile = null;
-		if (options.commiter) {
-			Deno.mkdirSync(this.path, { recursive: true });
-			const lockFile = Deno.openSync(join(this.path, "COMMITTER.lock"), { create: true, read: true, write: true });
-			if (!lockFile.tryLockSync(true)) {
-				lockFile.close();
-				throw new Error(`another committer already holds ${join(this.path, "COMMITTER.lock")}`);
-			}
-			this.lockFile = lockFile;
-		}
 
 		this.buckets = SharedArrayStore.open({
 			path: join(this.path, "buckets"),
-			writable: options.commiter,
 			item: new NullableNumaricCodec(options.links.index),
 			minChunkSize: options.buckets.minChunkSize,
 		});
 		this.links = SharedArrayStore.open({
 			path: join(this.path, "links"),
-			writable: options.commiter,
 			item: new StructCodec({ prevIndex: new NullableNumaricCodec(options.links.index), entryPointer: options.entries.pointer }),
 			minChunkSize: options.links.minChunkSize,
 		});
@@ -101,12 +88,17 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 			chunkSize: options.entries.chunkSize,
 		});
 
-		if (options.commiter) {
-			if (this.buckets.size() === 0) this.buckets.reveal(options.buckets.initialSize);
-			if (this.links.size() === 0) {
-				this.links.reveal(1);
-				this.links.set(0, { prevIndex: null, entryPointer: 0 });
-			}
+		// One-time seeding on a brand-new store. Unconditional + idempotent
+		// (size()===0 check), same pattern as the genesis header seed in
+		// chain/worker.ts — relies on the chain worker opening the manifest
+		// (and therefore every store) before any consume worker is spawned, so
+		// this always runs exactly once, in chain, before anyone else could
+		// race it. No lock needed for the same reason genesis seeding needs
+		// none.
+		if (this.buckets.size() === 0) this.buckets.reveal(options.buckets.initialSize);
+		if (this.links.size() === 0) {
+			this.links.reveal(1);
+			this.links.set(0, { prevIndex: null, entryPointer: 0 });
 		}
 	}
 
@@ -123,17 +115,23 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		return links > 0 ? links - 1 : 0;
 	}
 
+	/**
+	 * Append one (key, value) entry: write its bytes into the entries blob at
+	 * the pre-staged next free pointer, write its link slot, pre-stage the
+	 * following entry's pointer, then reveal() to wire it into its bucket.
+	 * Whichever worker is currently the exclusive committer just calls this
+	 * directly — no staging, no remote pointer recompute.
+	 */
 	public put(key: Codec.InferInput<Key>, value: Codec.InferInput<Value>): number {
 		const index = this.entryCount;
-		const from = this.links.get(index).entryPointer;
+		const from = this.links.get(index).entryPointer; // pre-staged by the previous put()
 		const written = this.entry.encodeInto([key, value], this.entries.mmap(this.maxEntrySize, from));
 		this.entries.reveal(from + written);
-		// Stage the next free pointer slot BEFORE reveal(): reveal()'s linking
-		// loop reads links.get(index) and rewrites its prevIndex (entryPointer is
-		// preserved), then advances the links cursor past index + 1. Advancing
-		// the links cursor first would make entryCount == the reveal target and
-		// the linking loop would never run — the entry would be written but
-		// unreachable from its bucket.
+		// Pre-stage the NEXT free pointer before reveal(): reveal()'s linking
+		// loop reads links.get(index) for THIS entry's pointer (already there)
+		// and rewrites its prevIndex, then advances past index + 1 — so
+		// index + 1's entryPointer must already be in place for the following
+		// put() to read, same alignment function (entries.next) as always.
 		this.links.set(index + 1, { prevIndex: null, entryPointer: this.entries.next(this.maxEntrySize, from + written) });
 		this.reveal(index + 1);
 		return index;
@@ -142,7 +140,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	public get(key: Codec.InferInput<Key>, isSha256?: boolean): Codec.InferOutput<Value> | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
 		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
+		let index = this.buckets.get(bucket);
 		while (index !== null) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
@@ -168,7 +166,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	public getIndex(key: Codec.InferInput<Key>, isSha256?: boolean): number | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
 		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
+		let index = this.buckets.get(bucket);
 		while (index !== null) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
@@ -199,7 +197,7 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	public getValueAndIndex(key: Codec.InferInput<Key>, isSha256?: boolean): [Codec.InferOutput<Value>, number] | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
 		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.commiter && this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
+		let index = this.buckets.get(bucket);
 		while (index !== null) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
@@ -226,29 +224,30 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		return this.getIndex(key, isSha256) !== undefined;
 	}
 
+	/**
+	 * Wire entries [entryCount, size) into their buckets, straight into the
+	 * real shared buckets store — no staging map. Every other worker sees
+	 * this the instant it lands, through the page cache. Entry bytes and
+	 * link slots for this range must already be written (put() does both
+	 * before calling this).
+	 */
 	public override reveal(size: number): void {
 		const targetEntries = size;
 		const currentEntries = this.entryCount;
-		// Readers observe sub-store cursors directly through their shared
-		// mappings, which are always at or ahead of the last pinned broadcast —
-		// so a broadcast arriving "behind" is the normal, already-caught-up case
-		// for them. Only the writer enforces the forward-only invariant.
-		if (this.commiter && targetEntries < currentEntries) {
+		if (targetEntries < currentEntries) {
 			throw new RangeError(`reveal entries=${targetEntries} is behind the cursor (entries=${currentEntries}); reveal only moves forward`);
 		}
-		// Sub-stores first: the linking loop below reads links.get(index) and
-		// buckets.get(bucket), which bounds-check against their own cursors.
+		// links first: the linking loop below reads links.get(index), which
+		// bounds-checks against the links cursor.
 		this.links.reveal(targetEntries + 1);
-		if (this.commiter) {
-			for (let index = currentEntries; index < targetEntries; index++) {
-				const link = this.links.get(index);
-				const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
-				const [, keySize] = this.key.decode(mmap);
-				const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
-				const head = this.stagedBuckets.has(bucket) ? this.stagedBuckets.get(bucket)! : this.buckets.get(bucket);
-				this.links.set(index, { prevIndex: head, entryPointer: link.entryPointer });
-				this.stagedBuckets.set(bucket, index);
-			}
+		for (let index = currentEntries; index < targetEntries; index++) {
+			const link = this.links.get(index);
+			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
+			const [, keySize] = this.key.decode(mmap);
+			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
+			const head = this.buckets.get(bucket);
+			this.links.set(index, { prevIndex: head, entryPointer: link.entryPointer });
+			this.buckets.set(bucket, index);
 		}
 	}
 
@@ -263,7 +262,6 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
 			this.buckets.set(bucket, link.prevIndex);
 		}
-		this.stagedBuckets.clear();
 		const entriesEnd = this.links.get(targetEntries).entryPointer;
 		this.links.truncate(targetEntries + 1);
 		this.entries.truncate(entriesEnd);
@@ -272,10 +270,6 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	public override sync(): void {
 		this.entries.sync();
 		this.links.sync();
-		for (const [bucket, index] of this.stagedBuckets) {
-			this.buckets.set(bucket, index);
-		}
-		this.stagedBuckets.clear();
 		this.buckets.sync();
 	}
 
@@ -283,11 +277,6 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		this.entries.close();
 		this.links.close();
 		this.buckets.close();
-		if (this.lockFile) {
-			this.lockFile.unlockSync();
-			this.lockFile.close();
-			this.lockFile = null;
-		}
 	}
 
 	private hashKey(keyBytes: Uint8Array, isSha256: boolean | undefined): number {

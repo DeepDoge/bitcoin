@@ -97,24 +97,54 @@ export class StoredTxInputCodec extends Codec<Output, Input> {
 		const seqTag = sequenceTagForU32(seqU32);
 		const seqExplicit = seqTag === SEQ_EXPLICIT;
 
-		const scriptSigEncoded = scriptSigCodec.encode(input.scriptSig);
-		const witnessEncoded = StoredWitness.encode(input.witness);
-
 		if (target === undefined) {
-			// Size-compute pass then single allocation.
+			// No target: sizes must be known upfront for a single allocation, so
+			// scriptSig/witness have to be pre-encoded here to measure them.
+			const scriptSigEncoded = scriptSigCodec.encode(input.scriptSig);
+			const witnessEncoded = StoredWitness.encode(input.witness);
 			const outputSize = input.prevOut.txId === null ? 0 : VarInt.encode(input.prevOut.output).length;
 
 			const totalLength = StoredPrevOutTxId.stride.size + outputSize + 1 + (seqExplicit ? 4 : 0) +
 				scriptSigEncoded.length + witnessEncoded.length;
 			const result = new Uint8Array(totalLength);
-			this.writeInto(input, result, 0, seqU32, seqTag, seqExplicit, scriptSigEncoded, witnessEncoded);
+			this.writeIntoPrecomputed(input, result, 0, seqU32, seqTag, seqExplicit, scriptSigEncoded, witnessEncoded);
 			return [result as TU, result.length];
 		}
 
-		return [target, this.writeInto(input, target, offset!, seqU32, seqTag, seqExplicit, scriptSigEncoded, witnessEncoded)];
+		// Target provided: write every field straight into it via encodeInto —
+		// no throwaway scriptSig/witness buffers, no copy.
+		return [target, this.writeInto(input, target, offset!, seqU32, seqTag, seqExplicit)];
 	}
 
 	private writeInto(
+		input: Input,
+		target: Uint8Array,
+		offset: number,
+		seqU32: number,
+		seqTag: number,
+		seqExplicit: boolean,
+	): number {
+		const start = offset;
+
+		offset += StoredPrevOutTxId.encodeInto(input.prevOut.txId, target, offset);
+		if (input.prevOut.txId !== null) {
+			offset += VarInt.encodeInto(input.prevOut.output, target, offset);
+		}
+
+		const tagByte = (seqTag << SEQ_SHIFT) & SEQ_MASK;
+		target[offset++] = tagByte;
+
+		if (seqExplicit) {
+			offset += U32.encodeInto(seqU32, target, offset);
+		}
+
+		offset += scriptSigCodec.encodeInto(input.scriptSig, target, offset);
+		offset += StoredWitness.encodeInto(input.witness, target, offset);
+
+		return offset - start;
+	}
+
+	private writeIntoPrecomputed(
 		input: Input,
 		target: Uint8Array,
 		offset: number,

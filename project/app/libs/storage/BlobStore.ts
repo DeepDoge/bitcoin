@@ -42,7 +42,16 @@ type Chunk = { mapping: Mmap; bytes: Uint8Array };
 export class BlobStore extends Store implements Disposable {
 	public readonly path: string;
 	public readonly chunkSize: number;
-	private cursor: number;
+
+	// The cursor lives in its own shared mapping (same pattern as
+	// SharedArrayStore) so every opener — writer and readers alike — observes
+	// the same size live through the page cache, with no broadcast/pin needed
+	// to find out. There's never more than one active writer at a time (the
+	// pipeline only ever has one commit in flight), so a plain Atomics
+	// load/store here is just for cross-process visibility, not mutual
+	// exclusion.
+	private cursorMmap: Mmap;
+	private cursor: BigUint64Array;
 
 	private pool: ArchiveWorkerPool | undefined;
 	private maxRestoredChunks = 0;
@@ -56,9 +65,11 @@ export class BlobStore extends Store implements Disposable {
 
 	private constructor(options: BlobStoreOptions) {
 		super();
-		this.cursor = 0;
 		this.path = options.path;
 		this.chunkSize = options.chunkSize;
+		Deno.mkdirSync(this.path, { recursive: true });
+		this.cursorMmap = Mmap.openSync(join(this.path, "CURSOR"), { write: true, ensureFileSize: BigUint64Array.BYTES_PER_ELEMENT });
+		this.cursor = new BigUint64Array(this.cursorMmap.buffer(), 0, 1);
 		// Restore is a READ-path concern, needed by every opener regardless of
 		// whether this one archives. Set the decompress options here from the
 		// store's own config so a reader (e.g. the app worker, which never calls
@@ -70,17 +81,17 @@ export class BlobStore extends Store implements Disposable {
 
 	public static open(options: BlobStoreOptions): BlobStore {
 		const self = new BlobStore(options);
-		Deno.mkdirSync(self.path, { recursive: true });
 		cleanUp(self.path);
 		return self;
 	}
 
 	public override sync(): void {
 		for (const chunk of this.chunks.values()) chunk.mapping.flush();
+		this.cursorMmap.flush();
 	}
 
 	public override size(): number {
-		return this.cursor;
+		return Number(Atomics.load(this.cursor, 0));
 	}
 
 	public next(maxItemSize: number, from: number = this.size()): number {
@@ -88,9 +99,9 @@ export class BlobStore extends Store implements Disposable {
 		return room < maxItemSize ? from + room : from;
 	}
 
-	public reveal(size: number, _isBroadcast?: boolean): void {
+	public reveal(size: number): void {
 		if (size < this.size()) throw new RangeError(`reveal size=${size} is behind the cursor (size=${this.size()}); reveal only moves forward`);
-		this.cursor = size;
+		Atomics.store(this.cursor, 0, BigInt(size));
 	}
 
 	/** append convenience: write at the cursor then reveal past it. sugar over commit+reveal. */
@@ -118,14 +129,19 @@ export class BlobStore extends Store implements Disposable {
 			rm(archiveTmpPath(tailPath));
 		}
 
-		this.cursor = size;
+		Atomics.store(this.cursor, 0, BigInt(size));
 	}
 
 	public get<T extends Codec>(pointer: number, codec: T): [Codec.InferOutput<T>, number] {
 		const size = this.size();
 		if (pointer >= size) throw new Error(`read at offset=${pointer} is past the cursor (size=${size})`);
 		const index = Math.floor(pointer / this.chunkSize);
-		const map = this.chunk(index);
+		// create=false: a pure read must never fabricate a zero-filled chunk —
+		// pointer < size means this offset was already written by someone, so a
+		// missing chunk file here means real (disk/consistency) corruption, not
+		// "not written yet". Surface that loudly instead of silently returning
+		// zeros from a freshly-materialized empty chunk.
+		const map = this.chunk(index, false);
 		return codec.decode(map.bytes, pointer % this.chunkSize);
 	}
 
@@ -133,7 +149,7 @@ export class BlobStore extends Store implements Disposable {
 		const size = this.size();
 		if (pointer >= size) throw new Error(`read at offset=${pointer} is past the cursor (size=${size})`);
 		const index = Math.floor(pointer / this.chunkSize);
-		const map = await this.chunkAsync(index);
+		const map = await this.chunkAsync(index, false);
 		return codec.decode(map.bytes, pointer % this.chunkSize);
 	}
 
@@ -177,7 +193,14 @@ export class BlobStore extends Store implements Disposable {
 		return map.bytes.subarray(start, start + maxItemSize);
 	}
 
-	private chunk(index: number): Chunk {
+	// `create` controls whether a MISSING chunk file gets fabricated (zero-filled,
+	// via Mmap's ensureFileSize) or throws. Defaults to true because this method
+	// is shared by the write path (stage/mmap/append), which legitimately needs
+	// to materialize a chunk it's about to write into for the first time.
+	// get()/getAsync() — pure reads of already-appended data — pass false: a
+	// missing chunk there means real corruption, not "not written yet", and
+	// silently returning zeros would hide that.
+	private chunk(index: number, create = true): Chunk {
 		const cached = this.chunks.get(index);
 		if (cached) return cached;
 
@@ -189,16 +212,22 @@ export class BlobStore extends Store implements Disposable {
 		// a pure reader restores and maps but never touches the .zst/raw lifecycle.
 		if (this.pool && isArchived(path) && !existsSync(path)) this.makeSpace(index);
 		ensureRestored(path, this.restoreSyncOptions);
+		if (!create && !existsSync(path)) {
+			throw new Error(`chunk ${index} at ${path} does not exist (read past written data, or on-disk corruption)`);
+		}
 		return this.map(index, Mmap.openSync(path, { write: true, ensureFileSize: this.chunkSize }));
 	}
 
-	public async chunkAsync(index: number): Promise<Chunk> {
+	public async chunkAsync(index: number, create = true): Promise<Chunk> {
 		const cached = this.chunks.get(index);
 		if (cached) return cached;
 
 		const path = chunkPath(this.path, index);
 		if (this.pool && isArchived(path) && !existsSync(path)) this.makeSpace(index);
 		await ensureRestoredAsync(path, this.restoreStreamOptions, this.restoring);
+		if (!create && !existsSync(path)) {
+			throw new Error(`chunk ${index} at ${path} does not exist (read past written data, or on-disk corruption)`);
+		}
 		return this.map(index, await Mmap.open(path, { write: true, ensureFileSize: this.chunkSize }));
 	}
 
@@ -289,6 +318,8 @@ export class BlobStore extends Store implements Disposable {
 			chunk.mapping.close();
 		}
 		this.chunks.clear();
+		this.cursorMmap.flush();
+		this.cursorMmap.close();
 	}
 
 	public [Symbol.dispose](): void {
