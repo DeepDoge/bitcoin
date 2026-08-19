@@ -1,19 +1,15 @@
+import { Bytes32, WireBlock, WireBlockHeader, WireBlockHeaders, WireTxs } from "@project/codecs";
+import { FastUint8ArraySet, Queue } from "@project/collections";
+import { MAX_BLOCK_SIZE, MINUTE, SECOND } from "@project/utils";
 import { delay } from "@std/async";
 import { equals } from "@std/bytes";
-import { manifest } from "~/chain/manifest.ts";
-import { GENESIS_BLOCK, GENESIS_BLOCK_HASH } from "~/chain/genesis.ts";
-import { verifySatoshiMerkleRoot } from "~/chain/merkle.ts";
-import { Bytes32 } from "@project/codecs";
-import { WireBlock } from "@project/codecs";
-import { WireBlockHeader } from "@project/codecs";
-import { WireBlockHeaders } from "@project/codecs";
-import { WireTxs } from "@project/codecs";
-import { MAX_BLOCK_SIZE, MiB, MINUTE, SECOND } from "@project/utils";
-import { BASE_DATA_DIR, PARALLELISM_THREADS } from "~/env.ts";
-import { join } from "@std/path";
 import { encodeHex } from "@std/encoding";
-import { FastUint8ArraySet } from "@project/collections";
-import { Queue } from "@project/collections";
+import { join } from "@std/path";
+import { GENESIS_BLOCK, GENESIS_BLOCK_HASH } from "~/chain/genesis.ts";
+import { manifest } from "~/chain/manifest.ts";
+import { verifySatoshiMerkleRoot } from "~/chain/merkle.ts";
+import { ChainWorkerResult } from "~/chain/worker.ts";
+import { BASE_DATA_DIR, PARALLELISM_THREADS } from "~/env.ts";
 import { BlockMessage } from "~/p2p/messages/Block.ts";
 import { GetDataMessage, MSG_WITNESS_BLOCK } from "~/p2p/messages/GetData.ts";
 import { GetHeadersMessage } from "~/p2p/messages/GetHeaders.ts";
@@ -23,7 +19,6 @@ import { handshake } from "~/p2p/peers.ts";
 
 console.log("[p2p] booting");
 
-// ── protocol / peers ─────────────────────────────────────────────────────────
 const PROTOCOL_VERSION = 70015;
 const MAGIC = new Uint8Array([0xf9, 0xbe, 0xb4, 0xd9]); // mainnet
 const P2P_PORT = 8333;
@@ -37,12 +32,7 @@ const RECONNECT_MAX_MS = 30 * SECOND;
 const PEER_SYNC_COOLDOWN = 20 * MINUTE;
 const SYNC_POLL_INTERVAL = 10;
 
-// ── block-download memory model (two knobs, everything else derived) ──────────
-// BYTES_PER_ROUND is fixed (bounded by commit cost); LOOKAHEAD_FRACTION is the
-// elastic buffer that grows with RAM. Chunk = one round split across workers.
-const BYTES_PER_ROUND_MIN = MAX_BLOCK_SIZE * PARALLELISM_THREADS;
-const BYTES_PER_ROUND = Math.max(64 * MiB, BYTES_PER_ROUND_MIN);
-const CHUNK_BYTE_BUDGET = Math.ceil(BYTES_PER_ROUND / PARALLELISM_THREADS);
+const CHUNK_BYTE_BUDGET = MAX_BLOCK_SIZE; // small chunks = fast acks = p2p keeps flowing
 
 const LOOKAHEAD_FRACTION = 0.10;
 const lookaheadBytes = Deno.systemMemoryInfo().total * LOOKAHEAD_FRACTION;
@@ -114,8 +104,7 @@ const lastPeerSync = new WeakMap<Peer, number>();
 // for more — the ack means the header mmap is pinned and safe to read. Only one
 // header batch is ever in flight (syncHeaders awaits each), so a single pending
 // resolver is enough.
-type ApplyResult = { adopted: number; rewind?: number };
-let pendingHeaderApply: ((result: ApplyResult) => void) | undefined;
+let pendingHeaderApply: ((result: ChainWorkerResult) => void) | undefined;
 
 let started = false;
 let cursor = 0; // download blocks after this height
@@ -160,10 +149,6 @@ function tipHeight(): number {
 	return manifest.stores.header.size() - 1;
 }
 
-function headerAt(height: number): WireBlockHeader | undefined {
-	return manifest.stores.header.get(height);
-}
-
 function headerHashAt(height: number): Uint8Array | undefined {
 	return manifest.stores.header.get(height)?.hash();
 }
@@ -177,6 +162,13 @@ function headerHashAt(height: number): Uint8Array | undefined {
 function heightOfHash(hash: Uint8Array): number | undefined {
 	const height = manifest.stores.headerhash.get(hash);
 	if (height === undefined) return undefined;
+	if (!Number.isInteger(height) || height < 0) {
+		console.error(
+			`[p2p] headerhash returned a bogus value for hash=${encodeHex(hash)}: ${height} ` +
+				`(headerhash size=${manifest.stores.header.size()})`,
+		);
+		return undefined;
+	}
 	const at = headerHashAt(height);
 	return at && equals(at, hash) ? height : undefined;
 }
@@ -255,8 +247,8 @@ async function requestBlocks(live: Peer[], fromHeight: number, top: number, glob
 		for (const w of batch) blockInFlight.set(w.height, { peer, at: now }); // reserve before await
 		try {
 			await peer.send(GetDataMessage, { inventory: batch.map((w) => ({ type: MSG_WITNESS_BLOCK, hash: w.hash })) });
-		} catch (e) {
-			console.error("[p2p] getdata error:", e);
+		} catch (reason) {
+			console.error("[p2p] getdata error:", reason);
 			for (const w of batch) blockInFlight.delete(w.height); // unsend so they retry elsewhere
 		}
 	}
@@ -272,8 +264,8 @@ function ensureBlockListener(peer: Peer): void {
 		let block: WireBlock;
 		try {
 			[block] = WireBlock.decode(msg.payload);
-		} catch (e) {
-			console.error("[p2p] block decode error:", e);
+		} catch (reason) {
+			console.error("[p2p] block decode error:", reason);
 			return;
 		}
 
@@ -429,7 +421,7 @@ async function syncBlocks(): Promise<void> {
 
 	if (chunkLen === 0) return;
 	const packed = chunk.subarray(0, chunkLen);
-	console.log(`[p2p] post upTo=${packHeight - 1} size=${chunkLen}`);
+	// console.log(`[p2p] post upTo=${packHeight - 1} size=${chunkLen}`);
 	port.postMessage({ type: "blocks", data: packed }, [packed.buffer]);
 	postedChunks++;
 	cursor = packHeight - 1;
@@ -463,10 +455,10 @@ async function startSyncBlocks(): Promise<void> {
  * nothing new, stop) and, on a reorg below our download cursor, the height to
  * rewind block downloading to.
  */
-function sendHeadersToChain(headers: WireBlockHeader[]): Promise<ApplyResult> {
+function sendHeadersToChain(headers: WireBlockHeader[]): Promise<ChainWorkerResult> {
 	if (pendingHeaderApply) throw new Error("a header batch is already awaiting chain — syncHeaders must be serial");
 	const bytes = WireBlockHeaders.encode(headers);
-	const result = new Promise<ApplyResult>((resolve) => (pendingHeaderApply = resolve));
+	const result = new Promise<ChainWorkerResult>((resolve) => (pendingHeaderApply = resolve));
 	port.postMessage({ type: "headers", data: bytes });
 	return result;
 }
@@ -603,16 +595,16 @@ async function drainMessages(): Promise<void> {
 			cursor = message.data;
 			continue;
 		}
-		if (message.type === "consume") {
+		if (message.type === "blocks") {
 			consumedChunks++;
 			continue;
 		}
-		if (message.type === "headers-applied") {
+		if (message.type === "headers") {
 			// chain finished applying + pinning the batch we forwarded. Hand the
 			// result to whoever's awaiting in syncHeaders.
 			const resolve = pendingHeaderApply;
 			pendingHeaderApply = undefined;
-			resolve?.(message.data as ApplyResult);
+			resolve?.(message.data);
 			continue;
 		}
 		if (message.type === "blacklist") {

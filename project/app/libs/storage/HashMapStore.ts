@@ -2,8 +2,9 @@ import { Codec, FixedCodec, StructCodec, TupleCodec, TupleOutput } from "@nomads
 import { IfNever, MAX_BLOCK_SIZE } from "@project/utils";
 import { equals } from "@std/bytes";
 import { join } from "@std/path";
+import { Mmap } from "@nomadshiba/mmap";
 import { BlobStore } from "~/libs/storage/BlobStore.ts";
-import { SharedArrayStore } from "~/libs/storage/SharedArrayStore.ts";
+import { AtomicMmapArray } from "~/libs/storage/AtomicMmapArray.ts";
 import { Store } from "~/libs/storage/Store.ts";
 import { NullableNumaricCodec } from "@project/codecs";
 import { sha256 } from "@noble/hashes/sha2";
@@ -31,14 +32,9 @@ export type HashMapStoreOptions<Key extends Codec, Value extends Codec> = {
 	sha256?: boolean;
 };
 
-// There is only ever one active writer at a time across the whole worker
-// pool (the pipeline hands out an exclusive "commit" turn, never two at
-// once), so every opener can safely write. reveal() wires buckets straight
-// into the real, shared SharedArrayStore the moment it runs — every other
-// worker sees it immediately through the page cache, no staging, no
-// broadcast, no separate "commit" step. sync() is durability only (msync);
-// pin() (in Manifest) is the durable checkpoint used for crash recovery and
-// nothing to do with cross-worker visibility.
+const META_GENERATION = 0;
+const META_COUNT = 1;
+
 export class HashMapStore<Key extends Codec, Value extends Codec> extends Store implements Disposable {
 	public readonly path: string;
 
@@ -54,9 +50,15 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 	public readonly maxEntrySize: number;
 	private loadFactor: LoadFactorOptions;
 
-	public readonly buckets: SharedArrayStore<NullableNumaricCodec<FixedCodec<number>>>;
-	public readonly links: SharedArrayStore<StructCodec<{ prevIndex: NullableNumaricCodec<FixedCodec<number>>; entryPointer: FixedCodec<number> }>>;
+	public readonly buckets: AtomicMmapArray<NullableNumaricCodec<FixedCodec<number>>>;
+	public readonly links: AtomicMmapArray<
+		StructCodec<{ prevIndex: NullableNumaricCodec<FixedCodec<number>>; entryPointer: FixedCodec<number> }>
+	>;
 	public readonly entries: BlobStore;
+
+	private meta: Mmap;
+	private metaView: Uint32Array;
+	private linkedCount = 0;
 
 	private constructor(options: HashMapStoreOptions<Key, Value>) {
 		super();
@@ -73,12 +75,12 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		this.maxEntrySize = options.entries.maxEntrySize ?? this.entry.stride.size!;
 		this.loadFactor = options.loadFactor;
 
-		this.buckets = SharedArrayStore.open({
+		this.buckets = AtomicMmapArray.open({
 			path: join(this.path, "buckets"),
 			item: new NullableNumaricCodec(options.links.index),
 			minChunkSize: options.buckets.minChunkSize,
 		});
-		this.links = SharedArrayStore.open({
+		this.links = AtomicMmapArray.open({
 			path: join(this.path, "links"),
 			item: new StructCodec({ prevIndex: new NullableNumaricCodec(options.links.index), entryPointer: options.entries.pointer }),
 			minChunkSize: options.links.minChunkSize,
@@ -88,198 +90,242 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 			chunkSize: options.entries.chunkSize,
 		});
 
-		// One-time seeding on a brand-new store. Unconditional + idempotent
-		// (size()===0 check), same pattern as the genesis header seed in
-		// chain/worker.ts — relies on the chain worker opening the manifest
-		// (and therefore every store) before any consume worker is spawned, so
-		// this always runs exactly once, in chain, before anyone else could
-		// race it. No lock needed for the same reason genesis seeding needs
-		// none.
-		if (this.buckets.size() === 0) this.buckets.reveal(options.buckets.initialSize);
+		Deno.mkdirSync(this.path, { recursive: true });
+		this.meta = Mmap.openSync(join(this.path, "META"), { write: true, ensureFileSize: 2 * Uint32Array.BYTES_PER_ELEMENT });
+		this.metaView = new Uint32Array(this.meta.buffer(), 0, 2);
+
+		if (this.bucketCount() === 0) {
+			this.buckets.resize(options.buckets.initialSize);
+			Atomics.store(this.metaView, META_COUNT, options.buckets.initialSize);
+			Atomics.store(this.metaView, META_GENERATION, 0);
+		}
 		if (this.links.size() === 0) {
-			this.links.reveal(1);
+			this.links.resize(1);
 			this.links.set(0, { prevIndex: null, entryPointer: 0 });
 		}
+		this.linkedCount = this.entryCount();
 	}
 
 	public static open<Key extends Codec, Value extends Codec>(options: HashMapStoreOptions<Key, Value>): HashMapStore<Key, Value> {
 		return new HashMapStore(options);
 	}
 
-	public override size(): number {
-		return this.entryCount;
+	public bucketCount(): number {
+		return Atomics.load(this.metaView, META_COUNT);
 	}
 
-	public get entryCount(): number {
+	public entryCount(): number {
 		const links = this.links.size();
 		return links > 0 ? links - 1 : 0;
 	}
 
-	/**
-	 * Append one (key, value) entry: write its bytes into the entries blob at
-	 * the pre-staged next free pointer, write its link slot, pre-stage the
-	 * following entry's pointer, then reveal() to wire it into its bucket.
-	 * Whichever worker is currently the exclusive committer just calls this
-	 * directly — no staging, no remote pointer recompute.
-	 */
+	public override snapshot(): number {
+		return this.entryCount();
+	}
+
 	public put(key: Codec.InferInput<Key>, value: Codec.InferInput<Value>): number {
-		const index = this.entryCount;
-		const from = this.links.get(index).entryPointer; // pre-staged by the previous put()
+		const index = this.entryCount();
+		const from = this.links.get(index).entryPointer;
 		const written = this.entry.encodeInto([key, value], this.entries.mmap(this.maxEntrySize, from));
 		this.entries.reveal(from + written);
-		// Pre-stage the NEXT free pointer before reveal(): reveal()'s linking
-		// loop reads links.get(index) for THIS entry's pointer (already there)
-		// and rewrites its prevIndex, then advances past index + 1 — so
-		// index + 1's entryPointer must already be in place for the following
-		// put() to read, same alignment function (entries.next) as always.
 		this.links.set(index + 1, { prevIndex: null, entryPointer: this.entries.next(this.maxEntrySize, from + written) });
 		this.reveal(index + 1);
 		return index;
 	}
 
-	public get(key: Codec.InferInput<Key>, isSha256?: boolean): Codec.InferOutput<Value> | undefined {
-		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
-		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.buckets.get(bucket);
-		while (index !== null) {
-			const link = this.links.get(index);
-			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
-			const [, keySize] = this.key.decode(mmap);
-
-			let equal: boolean;
-			if (this.sha256 && isSha256) {
-				sha256.create().update(mmap.subarray(0, keySize)).digestInto(this.sha256Scratch2);
-				equal = equals(this.sha256Scratch2, keyBytes);
-			} else {
-				equal = equals(mmap.subarray(0, keySize), keyBytes);
-			}
-
-			if (equal) {
-				const [value] = this.value.decode(mmap.subarray(keySize));
-				return value;
-			}
-			index = link.prevIndex;
-		}
-		return undefined;
+	public stage(key: Codec.InferInput<Key>, value: Codec.InferInput<Value>): number {
+		const index = this.entryCount();
+		const from = this.links.get(index).entryPointer;
+		const written = this.entry.encodeInto([key, value], this.entries.mmap(this.maxEntrySize, from));
+		this.entries.reveal(from + written);
+		this.links.set(index + 1, { prevIndex: null, entryPointer: this.entries.next(this.maxEntrySize, from + written) });
+		this.links.resize(index + 2);
+		return index;
 	}
 
 	public getIndex(key: Codec.InferInput<Key>, isSha256?: boolean): number | undefined {
 		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
-		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.buckets.get(bucket);
-		while (index !== null) {
-			const link = this.links.get(index);
-			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
-			const [, keySize] = this.key.decode(mmap);
+		for (let attempt = 0; attempt < 64; attempt++) {
+			const generation = this.generation();
+			if ((generation & 1) === 1) continue;
+			const bucket = this.hashKey(keyBytes, isSha256) % this.bucketCount();
+			let index = this.buckets.get(bucket);
+			let match: number | undefined;
+			while (index !== null) {
+				const link = this.links.get(index);
+				const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
+				const [, keySize] = this.key.decode(mmap);
 
-			let equal: boolean;
-			if (this.sha256 && isSha256) {
-				sha256.create().update(mmap.subarray(0, keySize)).digestInto(this.sha256Scratch2);
-				equal = equals(this.sha256Scratch2, keyBytes);
-			} else {
-				equal = equals(mmap.subarray(0, keySize), keyBytes);
+				let equal: boolean;
+				if (this.sha256 && isSha256) {
+					sha256.create().update(mmap.subarray(0, keySize)).digestInto(this.sha256Scratch2);
+					equal = equals(this.sha256Scratch2, keyBytes);
+				} else {
+					equal = equals(mmap.subarray(0, keySize), keyBytes);
+				}
+				if (equal) {
+					match = index;
+					break;
+				}
+				index = link.prevIndex;
 			}
 
-			if (equal) {
-				return index;
-			}
-			index = link.prevIndex;
+			if (this.generation() !== generation) continue;
+			return match;
 		}
-		return undefined;
 	}
 
-	public getEntry(index: number): TupleOutput<[Key, Value]> {
+	public getKeyAtIndex(index: number): Codec.InferOutput<Key> {
+		const link = this.links.get(index);
+		const [key] = this.key.decode(this.entries.mmap(this.maxEntrySize, link.entryPointer));
+		return key;
+	}
+
+	public getEntryAtIndex(index: number): TupleOutput<[Key, Value]> {
 		const link = this.links.get(index);
 		const [entry] = this.entry.decode(this.entries.mmap(this.maxEntrySize, link.entryPointer));
 		return entry;
 	}
 
-	public getValueAndIndex(key: Codec.InferInput<Key>, isSha256?: boolean): [Codec.InferOutput<Value>, number] | undefined {
-		const keyBytes = this.keyScratch.subarray(0, this.key.encodeInto(key, this.keyScratch));
-		const bucket = this.hashKey(keyBytes, isSha256) % this.buckets.size();
-		let index = this.buckets.get(bucket);
-		while (index !== null) {
-			const link = this.links.get(index);
-			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
-			const [, keySize] = this.key.decode(mmap);
+	public get(key: Codec.InferInput<Key>, isSha256?: boolean): Codec.InferOutput<Value> | undefined {
+		const index = this.getIndex(key, isSha256);
+		if (index === undefined) return undefined;
+		const [, value] = this.getEntryAtIndex(index);
+		return value;
+	}
 
-			let equal: boolean;
-			if (this.sha256 && isSha256) {
-				sha256.create().update(mmap.subarray(0, keySize)).digestInto(this.sha256Scratch2);
-				equal = equals(this.sha256Scratch2, keyBytes);
-			} else {
-				equal = equals(mmap.subarray(0, keySize), keyBytes);
-			}
-
-			if (equal) {
-				const [value] = this.value.decode(mmap.subarray(keySize));
-				return [value, index];
-			}
-			index = link.prevIndex;
-		}
-		return undefined;
+	public getEntry(key: Codec.InferInput<Key>, isSha256?: boolean): TupleOutput<[Key, Value]> | undefined {
+		const index = this.getIndex(key, isSha256);
+		if (index === undefined) return undefined;
+		return this.getEntryAtIndex(index);
 	}
 
 	public has(key: Codec.InferInput<Key>, isSha256?: boolean): boolean {
 		return this.getIndex(key, isSha256) !== undefined;
 	}
 
-	/**
-	 * Wire entries [entryCount, size) into their buckets, straight into the
-	 * real shared buckets store — no staging map. Every other worker sees
-	 * this the instant it lands, through the page cache. Entry bytes and
-	 * link slots for this range must already be written (put() does both
-	 * before calling this).
-	 */
-	public override reveal(size: number): void {
+	public reveal(size: number): void {
 		const targetEntries = size;
-		const currentEntries = this.entryCount;
+		const currentEntries = this.linkedCount;
 		if (targetEntries < currentEntries) {
-			throw new RangeError(`reveal entries=${targetEntries} is behind the cursor (entries=${currentEntries}); reveal only moves forward`);
+			throw new RangeError(
+				`reveal entries=${targetEntries} is behind the linked cursor (linked=${currentEntries}); reveal only moves forward`,
+			);
 		}
-		// links first: the linking loop below reads links.get(index), which
-		// bounds-checks against the links cursor.
-		this.links.reveal(targetEntries + 1);
+		this.links.resize(targetEntries + 1);
+		const bucketCount = this.bucketCount();
 		for (let index = currentEntries; index < targetEntries; index++) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
 			const [, keySize] = this.key.decode(mmap);
-			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
+			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % bucketCount;
 			const head = this.buckets.get(bucket);
 			this.links.set(index, { prevIndex: head, entryPointer: link.entryPointer });
 			this.buckets.set(bucket, index);
 		}
+		this.linkedCount = targetEntries;
+
+		// maybe grow
+		const count = this.bucketCount();
+		if (count === 0) return;
+		const entryCount = this.entryCount();
+		const load = entryCount / count;
+		if (load <= this.loadFactor.target + this.loadFactor.maxDrift) return;
+		const newCount = Math.max(count * 2, Math.ceil(entryCount / this.loadFactor.target));
+
+		// rehash
+		console.log(`[hashmap ${this.path}] rehash ${this.bucketCount} -> ${newCount} buckets (${entryCount} entries)`);
+		Atomics.add(this.metaView, META_GENERATION, 1);
+		this.buckets.resize(Math.max(this.buckets.size(), newCount));
+		this.rebuild(newCount, entryCount);
+		Atomics.store(this.metaView, META_COUNT, newCount);
+		Atomics.add(this.metaView, META_GENERATION, 1);
 	}
 
-	public override truncate(size: number): void {
-		const targetEntries = size;
-		const currentEntries = this.entryCount;
-		if (targetEntries > currentEntries) throw new RangeError(`truncate entries=${targetEntries} is ahead of the cursor (entries=${currentEntries})`);
+	// For the parallel-write path (see parallelHashMapWrite.ts): entries in
+	// [linkedCount, targetEntries) have already been written AND linked into
+	// buckets by the caller (via CasBucketArray), unlike normal reveal()
+	// which does the linking itself. This just advances the cursor and runs
+	// the same load-factor/rehash check reveal() ends with.
+	public revealPrelinked(targetEntries: number): void {
+		if (targetEntries < this.linkedCount) {
+			throw new RangeError(
+				`revealPrelinked entries=${targetEntries} is behind the linked cursor (linked=${this.linkedCount})`,
+			);
+		}
+		this.linkedCount = targetEntries;
+
+		const count = this.bucketCount();
+		if (count === 0) return;
+		const entryCount = this.entryCount();
+		const load = entryCount / count;
+		if (load <= this.loadFactor.target + this.loadFactor.maxDrift) return;
+		const newCount = Math.max(count * 2, Math.ceil(entryCount / this.loadFactor.target));
+
+		console.log(`[hashmap ${this.path}] rehash ${this.bucketCount} -> ${newCount} buckets (${entryCount} entries)`);
+		Atomics.add(this.metaView, META_GENERATION, 1);
+		this.buckets.resize(Math.max(this.buckets.size(), newCount));
+		this.rebuild(newCount, entryCount);
+		Atomics.store(this.metaView, META_COUNT, newCount);
+		Atomics.add(this.metaView, META_GENERATION, 1);
+	}
+
+	public recover(snapshot: number): void {
+		{
+			const generation = this.generation();
+			const bucketCount = this.bucketCount();
+			if ((generation & 1) === 0) return;
+			console.log(`[hashmap ${this.path}] repairing torn rehash at ${bucketCount} buckets`);
+			this.rebuild(this.bucketCount(), this.entryCount());
+			Atomics.add(this.metaView, META_GENERATION, 1);
+		}
+
+		const targetEntries = snapshot;
+		const currentEntries = this.entryCount();
+		if (targetEntries > currentEntries) {
+			throw new RangeError(`truncate entries=${targetEntries} is ahead of the cursor (entries=${currentEntries})`);
+		}
+
+		const bucketCount = this.bucketCount();
 		for (let index = currentEntries - 1; index >= targetEntries; index--) {
 			const link = this.links.get(index);
 			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
 			const [, keySize] = this.key.decode(mmap);
-			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % this.buckets.size();
+			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % bucketCount;
 			this.buckets.set(bucket, link.prevIndex);
 		}
 		const entriesEnd = this.links.get(targetEntries).entryPointer;
-		this.links.truncate(targetEntries + 1);
+		this.links.resize(targetEntries + 1);
 		this.entries.truncate(entriesEnd);
+		this.linkedCount = targetEntries;
 	}
 
 	public override sync(): void {
 		this.entries.sync();
 		this.links.sync();
 		this.buckets.sync();
+		this.meta.flush();
 	}
 
 	public close(): void {
 		this.entries.close();
 		this.links.close();
 		this.buckets.close();
+		this.meta.close();
 	}
 
-	private hashKey(keyBytes: Uint8Array, isSha256: boolean | undefined): number {
+	public [Symbol.dispose](): void {
+		this.close();
+	}
+
+	private generation(): number {
+		return Atomics.load(this.metaView, META_GENERATION);
+	}
+
+	// Made public so parallel bulk-write paths (see parallelHashMapWrite.ts)
+	// can compute the same bucket index this store's own getIndex()/reveal()
+	// use, without duplicating the hash algorithm in a second place.
+	public hashKey(keyBytes: Uint8Array, isSha256: boolean | undefined): number {
 		if (this.sha256 && !isSha256) {
 			sha256.create().update(keyBytes).digestInto(this.sha256Scratch1);
 			keyBytes = this.sha256Scratch1;
@@ -298,7 +344,16 @@ export class HashMapStore<Key extends Codec, Value extends Codec> extends Store 
 		return h >>> 0;
 	}
 
-	public [Symbol.dispose](): void {
-		this.close();
+	private rebuild(bucketCount: number, entryCount: number): void {
+		for (let bucket = 0; bucket < bucketCount; bucket++) this.buckets.set(bucket, null);
+		for (let index = 0; index < entryCount; index++) {
+			const link = this.links.get(index);
+			const mmap = this.entries.mmap(this.maxEntrySize, link.entryPointer);
+			const [, keySize] = this.key.decode(mmap);
+			const bucket = this.hashKey(mmap.subarray(0, keySize), false) % bucketCount;
+			const head = this.buckets.get(bucket);
+			this.links.set(index, { prevIndex: head, entryPointer: link.entryPointer });
+			this.buckets.set(bucket, index);
+		}
 	}
 }

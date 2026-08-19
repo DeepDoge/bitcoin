@@ -6,6 +6,7 @@ export * from "~/primitives/Bytes32.ts";
 export * from "~/primitives/CompactSize.ts";
 export * from "~/primitives/NullableNumaric.ts";
 export * from "~/primitives/ScriptNum.ts";
+export * from "~/primitives/SharedBytes.ts";
 export * from "~/primitives/U24.ts";
 export * from "~/primitives/U40.ts";
 export * from "~/primitives/U48.ts";

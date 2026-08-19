@@ -3,7 +3,7 @@ import { decodeHex } from "@std/encoding";
 import { RouterSchema } from "~/libs/routing/Router.ts";
 import { endpointRouter } from "~/router.ts";
 import { Block, Schema, TxSummary } from "~/routes.ts";
-import { manifest, getPrevOutTxId } from "~/chain/manifest.ts";
+import { manifest } from "~/chain/manifest.ts";
 import { StoredPubKey, StoredTx, WireTxInput, WireTxOutput } from "@project/codecs";
 import { WireTx } from "@project/codecs";
 import { sha256d } from "@project/hashes";
@@ -24,6 +24,13 @@ function resolveHeight(raw: string): number | undefined {
 	return manifest.stores.headerhash.get(parsed.hash);
 }
 
+// header.prevHash/merkleRoot alias the header store's mmap too (same reason
+// as toWireTx below) — copy them at the boundary before a header escapes
+// into an API response. Spread preserves the lazily-computed hash() method.
+function cloneHeader<H extends { prevHash: Uint8Array; merkleRoot: Uint8Array }>(header: H): H {
+	return { ...header, prevHash: header.prevHash.slice(), merkleRoot: header.merkleRoot.slice() };
+}
+
 function toWireTx(storedTx: StoredTx): Codec.InferInput<typeof WireTx> {
 	const { version, locktime } = storedTx.lockTimeAndVersionPack;
 
@@ -35,29 +42,36 @@ function toWireTx(storedTx: StoredTx): Codec.InferInput<typeof WireTx> {
 		}
 	}
 
+	// getPrevOutTxId/scriptSig/witness alias the underlying store's mmap
+	// (SharedBytesCodec decodes are zero-copy views, not owned buffers). This
+	// function's result escapes into an API response, so we copy those three
+	// fields out here, at the boundary, instead of trusting every future
+	// caller to know they're aliased. scriptPubKey needs no copy: toRaw()
+	// always allocates a fresh buffer.
 	const inputs: Codec.InferInput<typeof WireTxInput>[] = storedTx.inputs.map((input) => ({
-		prevOut: { txId: getPrevOutTxId(input), output: input.prevOut.output },
-		scriptSig: input.scriptSig,
+		prevOut: { txId: manifest.stores.chain.getPrevOutTxId(input).slice(), output: input.prevOut.output },
+		scriptSig: input.scriptSig.slice(),
 		sequence: input.sequence,
 	}));
 
 	const outputs: Codec.InferInput<typeof WireTxOutput>[] = storedTx.outputs.map((output) => {
-		const [scriptPubKey] = manifest.stores.pubkey.getEntry(output.scriptPubKey);
+		const scriptPubKey = manifest.stores.chain.getPubkeyAtIndex(output.scriptPubKey);
 		const value = BigInt(output.value);
 		return { value, scriptPubKey: StoredPubKey.toRaw(scriptPubKey) };
 	});
 
-	const witness: Uint8Array<ArrayBuffer>[][] = anyWitness ? storedTx.inputs.map((input) => input.witness.raw()) : [];
+	const witness: Uint8Array[][] = anyWitness ? storedTx.inputs.map((input) => input.witness.raw().map((item) => item.slice())) : [];
 
 	return { version, locktime, inputs, outputs, witness };
 }
 
 async function getBlockByHeight(height: number): Promise<RouterSchema.InferResultInput<Schema, "GET /v1/block/:hashOrHeight">> {
-	const header = await manifest.stores.header.getAsync(height);
-	if (!header) return null;
-	const block = await manifest.stores.block.getAsync(height);
+	const rawHeader = await manifest.stores.header.getAsync(height);
+	if (!rawHeader) return null;
+	const header = cloneHeader(rawHeader);
+	const block = await manifest.stores.chain.block.getAsync(height);
 	if (!block) return { header, height, info: null };
-	const [coinbaseTx] = await manifest.stores.tx.getAsync(block.txPointer, StoredTx);
+	const [coinbaseTx] = await manifest.stores.chain.tx.getAsync(block.txPointer, StoredTx);
 	const coinbaseInput = coinbaseTx.inputs[0];
 	if (!coinbaseInput) return { header, height, info: null };
 	return {
@@ -65,9 +79,10 @@ async function getBlockByHeight(height: number): Promise<RouterSchema.InferResul
 		height,
 		info: {
 			wireSize: block.wireSize,
-			reward: block.reward,
+			fees: block.fees,
 			txCount: block.txCount,
-			coinbaseScriptSig: coinbaseInput.scriptSig,
+			// alias of the tx BlobStore's mmap — copy at the boundary, see toWireTx.
+			coinbaseScriptSig: coinbaseInput.scriptSig.slice(),
 		},
 	};
 }
@@ -75,13 +90,14 @@ async function getBlockByHeight(height: number): Promise<RouterSchema.InferResul
 async function getHeaderByRangeAsync(from: number, to: number): Promise<Block[]> {
 	const [headers, blocks] = await Promise.all([
 		manifest.stores.header.sliceAsync(from, to + 1),
-		manifest.stores.block.sliceAsync(from, to + 1),
+		manifest.stores.chain.block.sliceAsync(from, to + 1),
 	]);
-	return await Promise.all(headers.map(async (header, index): Promise<Block> => {
+	return await Promise.all(headers.map(async (rawHeader, index): Promise<Block> => {
+		const header = cloneHeader(rawHeader);
 		const height = from + index;
 		const block = blocks[index];
 		if (!block) return { header, height, info: null };
-		const [coinbaseTx] = await manifest.stores.tx.getAsync(block.txPointer, StoredTx);
+		const [coinbaseTx] = await manifest.stores.chain.tx.getAsync(block.txPointer, StoredTx);
 		const coinbaseInput = coinbaseTx.inputs[0];
 		if (!coinbaseInput) return { header, height, info: null };
 		return {
@@ -89,9 +105,10 @@ async function getHeaderByRangeAsync(from: number, to: number): Promise<Block[]>
 			height,
 			info: {
 				wireSize: block.wireSize,
-				reward: block.reward,
+				fees: block.fees,
 				txCount: block.txCount,
-				coinbaseScriptSig: coinbaseInput.scriptSig,
+				// alias of the tx BlobStore's mmap — copy at the boundary, see toWireTx.
+				coinbaseScriptSig: coinbaseInput.scriptSig.slice(),
 			},
 		};
 	}));
@@ -136,9 +153,9 @@ endpointRouter.registerHandler("GET /v1/block/:hashOrHeight", async ({ params })
 endpointRouter.registerHandler("GET /v1/block/:hashOrHeight/txs", async ({ params }) => {
 	const height = resolveHeight(params.pathname.hashOrHeight);
 	if (height === undefined) return { status: "OK", data: [] };
-	const block = await manifest.stores.block.getAsync(height);
+	const block = await manifest.stores.chain.block.getAsync(height);
 	if (block === undefined) return { status: "OK", data: [] };
-	const [txs] = await manifest.stores.tx.getAsync(block.txPointer, new ArrayCodec(StoredTx, { size: block.txCount }));
+	const [txs] = await manifest.stores.chain.tx.getAsync(block.txPointer, new ArrayCodec(StoredTx, { size: block.txCount }));
 
 	const fromRaw = params.search && "from" in params.search ? Number(params.search["from"]) : 0;
 	const takeRaw = params.search && "take" in params.search ? Number(params.search["take"]) : MAX_TX_TAKE;
@@ -165,8 +182,8 @@ endpointRouter.registerHandler("GET /v1/block/:hashOrHeight/txs", async ({ param
 
 endpointRouter.registerHandler("GET /v1/tx/:txId", async ({ params }) => {
 	const txId = Uint8Array.from(decodeHex(params.pathname.txId).reverse());
-	const txInfo = manifest.stores.txid.get(txId);
+	const txInfo = manifest.stores.chain.txid.get(txId);
 	if (txInfo === undefined) return { status: "OK", data: null };
-	const [tx] = await manifest.stores.tx.getAsync(txInfo.txPointer, StoredTx);
+	const [tx] = await manifest.stores.chain.tx.getAsync(txInfo.txPointer, StoredTx);
 	return { status: "OK", data: toWireTx(tx) };
 });

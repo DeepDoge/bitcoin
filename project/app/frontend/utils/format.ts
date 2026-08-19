@@ -2,7 +2,7 @@ import { encodeHex } from "@std/encoding";
 import { U32 } from "@nomadshiba/codec";
 import type { LockTime } from "@project/codecs";
 import type { SequenceLock } from "@project/codecs";
-import { DAY, HOUR, MINUTE, MONTH, SECOND, WEEK, YEAR } from "@project/utils";
+import { DAY, HOUR, MINUTE, MONTH, SECOND, WEEK, YEAR, blockSubsidy } from "@project/utils";
 import { BigNumberFormat } from "~/frontend/utils/intl/BigNumberFormat.ts";
 
 export const LOCALE = new Intl.Locale("en-US");
@@ -91,13 +91,6 @@ export function formatDifficulty(n: number): string {
 const hashrateFormatter = new BigNumberFormat(LOCALE, { base: 1000, units: ["", "K", "M", "G", "T", "P", "E", "Z"], separator: "" });
 export function formatHashrate(n: number): string {
 	return hashrateFormatter.format(n);
-}
-
-// TODO: this should probably moved to shared space, protocol also gonna use this.
-export function blockSubsidy(height: number): bigint {
-	const halvings = Math.floor(height / 210_000);
-	if (halvings >= 64) return 0n;
-	return 50_00000000n >> BigInt(halvings);
 }
 
 const btcFormatter = new Intl.NumberFormat(LOCALE, { style: "currency", currency: "BTC" });

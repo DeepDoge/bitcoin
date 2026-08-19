@@ -2,18 +2,6 @@ import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 import zlib from "node:zlib";
 
-// archive.worker — runs zstd archiving on its OWN OS thread.
-//
-// This exists because Deno's node:zlib runs compression on the calling thread's
-// event loop (its async/stream APIs do NOT offload to libuv's threadpool the way
-// real Node does). Measured: N in-process "parallel" archives via Promise.all
-// gave ~0 speedup. Running each job in a separate Worker (a real thread with its
-// own isolate) gives near-linear multicore scaling.
-//
-// The worker does the file I/O itself: it's handed paths, streams raw -> zstd ->
-// tmp, and reports back. Nothing large ever crosses the isolate boundary, which
-// matters because chunks are ~1GB.
-
 export type Job = {
 	id: number;
 	index: number;
@@ -36,8 +24,8 @@ self.onmessage = async (event: MessageEvent<Job>) => {
 		const archivedSize = Deno.statSync(tmpPath).size;
 		const result: Done = { id, index, ok: true, archivedSize };
 		self.postMessage(result);
-	} catch (e) {
-		const result: Failed = { id, index, ok: false, error: e instanceof Error ? e.stack ?? e.message : String(e) };
+	} catch (reason) {
+		const result: Failed = { id, index, ok: false, error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) };
 		self.postMessage(result);
 	}
 };

@@ -38,8 +38,16 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 		return this.blob.size() / this.item.stride.size;
 	}
 
+	public override snapshot(): number {
+		return this.size();
+	}
+
 	public reveal(size: number): void {
 		return this.blob.reveal(size * this.item.stride.size);
+	}
+
+	public override recover(snapshot: number): void {
+		return this.truncate(snapshot);
 	}
 
 	public truncate(size: number): void {
@@ -94,23 +102,7 @@ export class ArrayStore<T extends FixedCodec> extends Store implements Disposabl
 	}
 
 	public mmap(index: number) {
-		// chunkSize is always a multiple of stride.size (enforced in open()), so an
-		// item at this offset never straddles a chunk boundary — begin can be the
-		// raw index*stride offset directly, no next() needed.
 		return this.blob.mmap(this.item.stride.size, index * this.item.stride.size);
-	}
-
-	public stage(item: Codec.InferInput<T>, index?: number): number {
-		const size = this.size();
-		index ??= size;
-		if (index < size) {
-			throw new RangeError([
-				`set index=${index} is behind the cursor (size=${size}).`,
-				`set can only fill space at or in front of the cursor`,
-			].join(" "));
-		}
-		this.item.encodeInto(item, this.mmap(index));
-		return index;
 	}
 
 	public sync(): void {

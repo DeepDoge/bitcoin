@@ -103,13 +103,13 @@ export async function addPeer(host: string, port: number, magic: Uint8Array): Pr
 		connected.set(k, peer);
 		failed.delete(k);
 		return peer;
-	} catch (e) {
+	} catch (reason) {
 		const f = failed.get(k);
 		if (f) {
 			f.count++;
 			f.lastFailed = Date.now();
 		} else failed.set(k, { count: 1, lastFailed: Date.now() });
-		console.error(`[peers] failed to connect ${k}:`, e);
+		console.error(`[peers] failed to connect ${k}:`, reason);
 		return null;
 	}
 }
@@ -175,8 +175,8 @@ export async function addPeersFromDNS(seedHost: string, port: number): Promise<n
 		for (const ip of ips) {
 			if (addKnownPeer(ip, port)) added++;
 		}
-	} catch (e) {
-		console.error(`[peers] DNS seed ${seedHost} failed:`, e);
+	} catch (reason) {
+		console.error(`[peers] DNS seed ${seedHost} failed:`, reason);
 	}
 	return added;
 }

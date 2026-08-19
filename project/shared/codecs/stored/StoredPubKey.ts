@@ -1,17 +1,18 @@
-import { BytesCodec, Codec, EnumCodec, StructCodec, U8, VarInt } from "@nomadshiba/codec";
+import { Codec, EnumCodec, StructCodec, U8, VarInt } from "@nomadshiba/codec";
+import { SharedBytesCodec } from "~/primitives/SharedBytes.ts";
 
 type Output = Codec.InferOutput<typeof Pattern>;
 type Input = Codec.InferInput<typeof Pattern> | Uint8Array;
 const Pattern = new EnumCodec({
-	raw: new StructCodec({ script: new BytesCodec({ sizer: VarInt }) }), //      	full script
-	p2pkh: new StructCodec({ hash: new BytesCodec({ size: 20 }) }), //           	OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG
-	p2sh: new StructCodec({ hash: new BytesCodec({ size: 20 }) }), //            	OP_HASH160 <20> OP_EQUAL
-	p2wpkh: new StructCodec({ hash: new BytesCodec({ size: 20 }) }), //          	OP_0 <20>
-	p2wsh: new StructCodec({ hash: new BytesCodec({ size: 32 }) }), //           	OP_0 <32>
-	p2tr: new StructCodec({ key: new BytesCodec({ size: 32 }) }), //             	OP_1 <32>
-	p2pk: new StructCodec({ key: new BytesCodec({ size: 33 }) }), //             	<33> OP_CHECKSIG            (compressed)
-	p2pkUncompressed: new StructCodec({ key: new BytesCodec({ size: 65 }) }), // 	<65> OP_CHECKSIG     (uncompressed)
-	opreturn: new StructCodec({ payload: new BytesCodec({ sizer: VarInt }) }), //	OP_RETURN <pushdata...>
+	raw: new StructCodec({ script: new SharedBytesCodec({ sizer: VarInt }) }), //      	full script
+	p2pkh: new StructCodec({ hash: new SharedBytesCodec({ size: 20 }) }), //           	OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG
+	p2sh: new StructCodec({ hash: new SharedBytesCodec({ size: 20 }) }), //            	OP_HASH160 <20> OP_EQUAL
+	p2wpkh: new StructCodec({ hash: new SharedBytesCodec({ size: 20 }) }), //          	OP_0 <20>
+	p2wsh: new StructCodec({ hash: new SharedBytesCodec({ size: 32 }) }), //           	OP_0 <32>
+	p2tr: new StructCodec({ key: new SharedBytesCodec({ size: 32 }) }), //             	OP_1 <32>
+	p2pk: new StructCodec({ key: new SharedBytesCodec({ size: 33 }) }), //             	<33> OP_CHECKSIG            (compressed)
+	p2pkUncompressed: new StructCodec({ key: new SharedBytesCodec({ size: 65 }) }), // 	<65> OP_CHECKSIG     (uncompressed)
+	opreturn: new StructCodec({ payload: new SharedBytesCodec({ sizer: VarInt }) }), //	OP_RETURN <pushdata...>
 }, { indexer: U8 });
 
 export class StoredPubKeyCodec extends Codec<Output, Input> {

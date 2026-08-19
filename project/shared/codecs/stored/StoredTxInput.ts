@@ -1,4 +1,5 @@
-import { Bytes, BytesCodec, Codec, Stride, StructCodec, U32, VarInt } from "@nomadshiba/codec";
+import { Codec, Stride, StructCodec, U32, VarInt } from "@nomadshiba/codec";
+import { SharedBytes, SharedBytesCodec } from "~/primitives/SharedBytes.ts";
 import { SequenceLock, SequenceLockCodec } from "~/SequenceLock.ts";
 import { StoredPrevOutTxId } from "~/stored/StoredPrevOutTxId.ts";
 import { StoredWitness } from "~/stored/StoredWitness.ts";
@@ -9,7 +10,7 @@ type T = StructCodec<{
 		txId: typeof StoredPrevOutTxId;
 		output: typeof VarInt;
 	}>;
-	scriptSig: typeof Bytes;
+	scriptSig: typeof SharedBytes;
 	sequence: typeof SequenceLock;
 	witness: typeof StoredWitness;
 }>;
@@ -44,8 +45,8 @@ type Output = Codec.InferOutput<T>;
  *   StoredWitness encoding
  */
 
-// Use BytesCodec for scriptSig length prefix
-const scriptSigCodec = new BytesCodec();
+// Use SharedBytesCodec for scriptSig length prefix (zero-copy decode)
+const scriptSigCodec = new SharedBytesCodec();
 
 // --- Tag byte layout ---
 // bits 0-1: sequence tag   0=0xFFFFFFFF, 1=0xFFFFFFFE, 2=0xFFFFFFFD, 3=explicit u32 follows

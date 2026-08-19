@@ -1,10 +1,11 @@
+// TODO: move this out, not a storage anymore
+
 import { type Codec, type FixedCodec } from "@nomadshiba/codec";
 import { Mmap } from "@nomadshiba/mmap";
 import { join } from "@std/path";
-import { Store } from "~/libs/storage/Store.ts";
 
-const VERSION_BYTES = Uint8Array.BYTES_PER_ELEMENT; // 1 — atomic version prefix per slot
-const BUSY = 255; // version 255 = a writer is mid-write; clean generations are 0..254
+const VERSION_BYTES = Uint8Array.BYTES_PER_ELEMENT;
+const BUSY = 255;
 
 export type SharedArrayStoreOptions<T extends FixedCodec> = {
 	path: string;
@@ -14,32 +15,19 @@ export type SharedArrayStoreOptions<T extends FixedCodec> = {
 
 type Chunk = { mapping: Mmap; bytes: Uint8Array };
 
-// Every opener maps every file read-write. There is never more than one active
-// writer at a time (the pipeline's own scheduling guarantees that — only one
-// commit is ever in flight across the whole worker pool), and a read-only
-// mapping bought no safety anyway: mmap here is always MAP_SHARED (see
-// @nomadshiba/mmap), so a "read-only" mapping is backed by the exact same
-// physical pages a writer mutates — `writable: false` only made this process's
-// own accidental writes segfault, it did nothing for torn-read protection
-// (that's what the version-byte seqlock in get()/set() is for, unconditionally).
-export class SharedArrayStore<T extends FixedCodec> extends Store implements Disposable {
+export class AtomicMmapArray<T extends FixedCodec> implements Disposable {
 	public readonly path: string;
 	public readonly item: T;
-	public readonly slotStride: number; // version(1) + payload
+	public readonly slotStride: number;
 	public readonly chunkSize: number;
 	public readonly slotsPerChunk: number;
 
-	// The cursor lives in its own shared mapping so every opener (writer and
-	// readers alike) observes the same size without waiting on the manifest's
-	// broadcast — the writer's stores are instantly visible through the page
-	// cache, and the file doubles as the restart-time restore point.
 	private cursorMmap: Mmap;
 	private cursor: BigUint64Array;
 	private chunks = new Map<number, Chunk>();
 	private readonly scratch: Uint8Array;
 
 	private constructor(options: SharedArrayStoreOptions<T>) {
-		super();
 		this.path = options.path;
 		this.item = options.item;
 		this.slotStride = VERSION_BYTES + options.item.stride.size;
@@ -52,12 +40,12 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 		this.cursor = new BigUint64Array(this.cursorMmap.buffer(), 0, 1);
 	}
 
-	public static open<T extends FixedCodec>(options: SharedArrayStoreOptions<T>): SharedArrayStore<T> {
+	public static open<T extends FixedCodec>(options: SharedArrayStoreOptions<T>): AtomicMmapArray<T> {
 		if (!Number.isInteger(options.item.stride.size) || options.item.stride.size <= 0) {
 			throw new RangeError(`item.stride.size must be a positive integer, got ${options.item.stride.size}`);
 		}
 		Deno.mkdirSync(options.path, { recursive: true });
-		return new SharedArrayStore(options);
+		return new AtomicMmapArray(options);
 	}
 
 	private openFile(file: string, bytes: number): Mmap {
@@ -74,21 +62,11 @@ export class SharedArrayStore<T extends FixedCodec> extends Store implements Dis
 		return chunk;
 	}
 
-	public override size(): number {
+	public size(): number {
 		return Number(Atomics.load(this.cursor, 0));
 	}
 
-	public override truncate(size: number): void {
-		if (size > this.size()) {
-			throw new RangeError(`truncate size=${size} is after the cursor (size=${this.size()}); truncate only moves backwards`);
-		}
-		Atomics.store(this.cursor, 0, BigInt(size));
-	}
-
-	public override reveal(size: number): void {
-		if (size < this.size()) {
-			throw new RangeError(`reveal size=${size} is behind the cursor (size=${this.size()}); reveal only moves forward`);
-		}
+	public resize(size: number): void {
 		Atomics.store(this.cursor, 0, BigInt(size));
 	}
 

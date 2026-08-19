@@ -1,15 +1,13 @@
-import { ArrayCodec, Bytes, Codec, NullableCodec, StructCodec, U32, VarInt, Void } from "@nomadshiba/codec";
+import { ArrayCodec, Codec, NullableCodec, StructCodec, U32, VarInt, Void } from "@nomadshiba/codec";
+import { Bytes32, SharedBytes, WireBlockHeader, WireTx } from "@project/codecs";
 import { RouterSchema } from "~/libs/routing/Router.ts";
-import { WireBlockHeader } from "@project/codecs";
-import { WireTx } from "@project/codecs";
-import { Bytes32 } from "@project/codecs";
 
 export type BlockInfo = Codec.InferOutput<typeof BlockInfo>;
 export const BlockInfo = new StructCodec({
 	wireSize: U32,
-	reward: VarInt,
+	fees: VarInt,
 	txCount: VarInt,
-	coinbaseScriptSig: Bytes,
+	coinbaseScriptSig: SharedBytes,
 });
 
 export type Block = Codec.InferOutput<typeof Block>;

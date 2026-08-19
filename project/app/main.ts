@@ -1,4 +1,3 @@
-import { manifest } from "~/chain/manifest.ts";
 import { ARGS } from "~/env.ts";
 
 function wireWorker(name: string, url: URL): Worker {

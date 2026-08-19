@@ -1,4 +1,5 @@
-import { BytesCodec, Codec, StructCodec, U32LE } from "@nomadshiba/codec";
+import { Codec, StructCodec, U32LE } from "@nomadshiba/codec";
+import { SharedBytesCodec } from "~/primitives/SharedBytes.ts";
 import { Bytes32 } from "~/primitives/Bytes32.ts";
 import { CompactSize } from "~/primitives/CompactSize.ts";
 import { SequenceLock } from "~/SequenceLock.ts";
@@ -15,6 +16,6 @@ export const WireTxInput = new StructCodec({
 		txId: Bytes32,
 		output: U32LE,
 	}),
-	scriptSig: new BytesCodec({ sizer: CompactSize }),
+	scriptSig: new SharedBytesCodec({ sizer: CompactSize }),
 	sequence: SequenceLock,
 });

@@ -38,3 +38,11 @@ export const COINBASE_VOUT = 0xFFFFFFFF;
 
 export const HALVING_BLOCKS = 210_000;
 export const DIFFICULTY_ADJUSTMENT_BLOCKS = 2016;
+
+export const COINBASE_VALUE = 50_00000000n;
+
+export function blockSubsidy(height: number): bigint {
+	const halvings = Math.floor(height / HALVING_BLOCKS);
+	if (halvings >= 64) return 0n;
+	return COINBASE_VALUE >> BigInt(halvings);
+}

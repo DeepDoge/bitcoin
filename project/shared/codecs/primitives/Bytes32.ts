@@ -1,3 +1,3 @@
-import { BytesCodec } from "@nomadshiba/codec";
+import { SharedBytesCodec } from "~/primitives/SharedBytes.ts";
 
-export const Bytes32 = new BytesCodec({ size: 32 });
+export const Bytes32 = new SharedBytesCodec({ size: 32 });

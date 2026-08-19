@@ -159,9 +159,9 @@ export class Peer {
 				if (n <= 0) throw new Error("connection closed during write");
 				written += n;
 			}
-		} catch (e) {
+		} catch (reason) {
 			if (timedOut) throw new Error(`write timeout after ${timeoutMs}ms`);
-			throw e;
+			throw reason;
 		} finally {
 			clearTimeout(timer);
 		}
@@ -277,13 +277,13 @@ export class Peer {
 						for (const l of this.listeners) {
 							try {
 								l(msg);
-							} catch (error) {
+							} catch (reason) {
 								// One listener throwing must not stop the others, but it
 								// must not vanish either — a swallowed throw here is how a
 								// rejected block became a silent drop + endless re-request.
 								// Listeners that can reject a message should handle it
 								// themselves (e.g. blacklist); anything reaching here is a bug.
-								console.error(`[p2p] listener threw on ${command}:`, error);
+								console.error(`[p2p] listener threw on ${command}:`, reason);
 							}
 						}
 					}
@@ -296,8 +296,8 @@ export class Peer {
 					len -= off;
 				}
 			}
-		} catch (e) {
-			this.disconnect({ type: "read_error", error: e });
+		} catch (reason) {
+			this.disconnect({ type: "read_error", error: reason });
 		} finally {
 			if (this.isConnected) this.disconnect({ type: "connection_closed" });
 		}

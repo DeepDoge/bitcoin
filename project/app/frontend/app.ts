@@ -3,6 +3,7 @@ import { encodeHex } from "@std/encoding";
 import { api } from "~/frontend/api.ts";
 import { BlockView } from "~/frontend/components/BlockView.ts";
 import { ChainTimeline } from "~/frontend/components/ChainTimeline.ts";
+import { TxView } from "~/frontend/components/TxView.ts";
 import { fragment } from "~/frontend/fragment.ts";
 import { GlobalStyle } from "~/frontend/style.ts";
 import { awaited } from "~/frontend/utils/dom/awaited.ts";
@@ -35,7 +36,11 @@ function App() {
 			);
 		}
 		if (fragment.kind === "tx") {
-			return null;
+			const txId = encodeHex(fragment.txId.toReversed());
+			return awaited(
+				api.fetch("GET /v1/tx/:txId", { params: { pathname: { txId } } })
+					.then((tx) => (tx ? TxView(tx) : null)),
+			);
 		}
 	});
 

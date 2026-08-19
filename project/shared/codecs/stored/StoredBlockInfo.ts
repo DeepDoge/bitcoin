@@ -7,5 +7,5 @@ export const StoredBlockInfo = new StructCodec({
 	wireSize: U32,
 	txPointer: StoredTxPointer,
 	txCount: U32,
-	reward: U56, // These are has to be fixed to be on ArrayStore, since this is per block size doesnt matter much anyway
+	fees: U56,
 });

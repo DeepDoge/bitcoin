@@ -8,16 +8,6 @@ type Pending = {
 	reject: (error: Error) => void;
 };
 
-/**
- * A persistent pool of Worker threads that run zstd archiving on real OS
- * threads (Deno's node:zlib runs compression on the calling thread, so this is
- * the only way to get genuine multicore archiving — see archive.worker.ts).
- *
- * Workers are spawned once and reused for the pool's lifetime. Jobs are queued
- * and handed to whichever worker goes idle next, so at most `size` chunks are
- * archived concurrently. Only the zstd + file I/O runs in the workers; the
- * caller keeps all the rename/remove/reader bookkeeping on the main thread.
- */
 export class ArchiveWorkerPool implements Disposable {
 	private readonly workers: Worker[] = [];
 	private readonly idle: Worker[] = [];
@@ -40,7 +30,6 @@ export class ArchiveWorkerPool implements Disposable {
 		}
 	}
 
-	/** Archive rawPath into tmpPath with the given zstd params. Resolves with the archived byte size. */
 	public archive(index: number, rawPath: string, tmpPath: string, params: zlib.ZstdOptions["params"]): Promise<number> {
 		if (this.disposed) return Promise.reject(new Error("archive pool is disposed"));
 		return new Promise<number>((resolve, reject) => {
@@ -78,9 +67,6 @@ export class ArchiveWorkerPool implements Disposable {
 	}
 
 	private onWorkerError(worker: Worker, event: ErrorEvent) {
-		// A crashed worker rejects whatever it was running; the worker is dead, so
-		// don't hand it more work. The pool shrinks by one — acceptable for a
-		// background maintenance task, and it'll be gone entirely on close().
 		const pending = this.busy.get(worker);
 		this.busy.delete(worker);
 		event.preventDefault?.();
@@ -92,10 +78,8 @@ export class ArchiveWorkerPool implements Disposable {
 
 	public dispose() {
 		this.disposed = true;
-		// Reject anything still queued (never started).
 		for (const pending of this.queue) pending.reject(new Error("archive pool disposed before job ran"));
 		this.queue.length = 0;
-		// Idle workers can go now; busy ones terminate when their current job posts back.
 		for (const worker of this.idle) worker.terminate();
 		this.idle.length = 0;
 	}

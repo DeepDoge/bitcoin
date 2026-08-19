@@ -1,5 +1,5 @@
-import { ArrayCodec, BytesCodec, Codec, EnumCodec, Stride, StructCodec, U8, Void } from "@nomadshiba/codec";
-import { CompactSize } from "~/primitives/CompactSize.ts";
+import { ArrayCodec, Codec, EnumCodec, Stride, StructCodec, U8, VarInt, Void } from "@nomadshiba/codec";
+import { SharedBytesCodec } from "~/primitives/SharedBytes.ts";
 
 // Signatures are variable-length (ECDSA-in-witness 71-73 incl. sighash byte,
 // BIP340 Schnorr 64 or 65), so they're stored LENGTH-PREFIXED, not padded to a
@@ -9,15 +9,15 @@ import { CompactSize } from "~/primitives/CompactSize.ts";
 // 64-73 byte sig and makes the round-trip byte-exact (required to recompute a
 // wtxid / serve a block). ECDSA only survived before because DER ends in a
 // nonzero sighash byte -- not something to rely on.
-const Sig = new BytesCodec({ sizer: U8 });
-const Pubkey = new BytesCodec({ size: 33 });
-const Script34 = new BytesCodec({ size: 34 });
-const Script71 = new BytesCodec({ size: 71 });
-const Script105 = new BytesCodec({ size: 105 });
-const Script39 = new BytesCodec({ size: 39 });
+const Sig = new SharedBytesCodec({ sizer: U8 });
+const Pubkey = new SharedBytesCodec({ size: 33 });
+const Script34 = new SharedBytesCodec({ size: 34 });
+const Script71 = new SharedBytesCodec({ size: 71 });
+const Script105 = new SharedBytesCodec({ size: 105 });
+const Script39 = new SharedBytesCodec({ size: 39 });
 
-const RawWitnessItem = new BytesCodec({ sizer: CompactSize });
-const RawWitness = new ArrayCodec(RawWitnessItem, { counter: CompactSize });
+const RawWitnessItem = new SharedBytesCodec({ sizer: VarInt });
+const RawWitness = new ArrayCodec(RawWitnessItem, { counter: VarInt });
 
 const P2WPKH = new StructCodec({ sig: Sig, pubkey: Pubkey });
 const P2TRKeyPath = new StructCodec({ sig: Sig });
@@ -157,7 +157,7 @@ export function detectWitnessPattern(items: Uint8Array[]): Codec.InferInput<type
 
 // ── Reconstruction ────────────────────────────────────────────────────────────
 
-function reconstructWitness(pattern: Codec.InferOutput<typeof WitnessEnum>): Uint8Array<ArrayBuffer>[] {
+function reconstructWitness(pattern: Codec.InferOutput<typeof WitnessEnum>): Uint8Array[] {
 	switch (pattern.kind) {
 		case "none":
 			return [];
@@ -228,7 +228,7 @@ function reconstructWitness(pattern: Codec.InferOutput<typeof WitnessEnum>): Uin
 	}
 }
 
-export type StoredWitness = Codec.InferOutput<typeof WitnessEnum> & { raw(): Uint8Array<ArrayBuffer>[] };
+export type StoredWitness = Codec.InferOutput<typeof WitnessEnum> & { raw(): Uint8Array[] };
 type WitnessInput = Codec.InferInput<typeof WitnessEnum> | Uint8Array[];
 
 export class StoredWitnessCodec extends Codec<StoredWitness, WitnessInput> {
@@ -242,7 +242,7 @@ export class StoredWitnessCodec extends Codec<StoredWitness, WitnessInput> {
 	public decoder(bytes: Uint8Array, offset: number): [StoredWitness, number] {
 		const [pattern, bytesRead] = WitnessEnum.decode(bytes, offset);
 		const stored = pattern as StoredWitness;
-		let rawCache: Uint8Array<ArrayBuffer>[] | undefined;
+		let rawCache: Uint8Array[] | undefined;
 		stored.raw = () => rawCache ??= reconstructWitness(pattern);
 		return [stored, bytesRead];
 	}

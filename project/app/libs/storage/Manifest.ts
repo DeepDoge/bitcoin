@@ -8,7 +8,6 @@ export type ManifestOptions<T extends ManifestStores> = {
 	path: string;
 	stores: T;
 	pinner: boolean;
-	beforeRecovery(ctx: { pins: ReadonlyMap<string, number>; stores: T }): void;
 };
 
 // Every store's cursor lives in its own shared mmap now (BlobStore and
@@ -32,12 +31,12 @@ export class Manifest<T extends ManifestStores> implements Disposable {
 		this.stores = options.stores;
 		this.storeMap = new Map(Object.entries(this.stores));
 		this.db = new DatabaseSync(join(this.path, "manifest.sqlite"));
-		this.db.exec(`PRAGMA journal_mode = WAL;`);
 		this.db.exec(`PRAGMA busy_timeout = 5000;`);
-		this.db.exec(`CREATE TABLE IF NOT EXISTS sizes (name TEXT PRIMARY KEY, pin INTEGER NOT NULL DEFAULT 0);`);
-		this.getPinsQuery = this.db.prepare("SELECT * FROM sizes");
+		this.db.exec(`PRAGMA journal_mode = WAL;`);
+		this.db.exec(`CREATE TABLE IF NOT EXISTS pins (name TEXT PRIMARY KEY, pin INTEGER NOT NULL DEFAULT 0);`);
+		this.getPinsQuery = this.db.prepare("SELECT * FROM pins");
 		this.pinQuery = this.db.prepare(
-			`INSERT INTO sizes (name, pin) VALUES (:name, :size) ON CONFLICT(name) DO UPDATE SET pin = excluded.pin;`,
+			`INSERT INTO pins (name, pin) VALUES (:name, :pin) ON CONFLICT(name) DO UPDATE SET pin = excluded.pin;`,
 		);
 		this.lockFile = null;
 		if (options.pinner) {
@@ -53,34 +52,15 @@ export class Manifest<T extends ManifestStores> implements Disposable {
 	public static open<T extends ManifestStores>(options: ManifestOptions<T>) {
 		Deno.mkdirSync(options.path, { recursive: true });
 		const manifest = new Manifest<T>(options);
-		// Only the pinner recovers. A non-pinner opener's stores already read
-		// the live, shared cursors straight off disk — there is nothing to
-		// catch up on. This also relies on the pinner (chain) always opening
-		// the manifest (and running recovery) before any consume worker is
-		// spawned, so a fresh consume worker never observes pre-recovery state.
 		if (!options.pinner) return manifest;
 
 		const pins = manifest.getPinsQuery.all() as { name: string; pin: number }[];
-		const pinMap = new Map<string, number>();
-		for (const { name, pin } of pins) pinMap.set(name, pin);
-
-		// Let the app undo cross-store side effects that landed on slots the
-		// mechanical truncate below is about to roll back. Every store's live
-		// cursor already reflects whatever survived the unclean shutdown (no
-		// reveal step needed — it was never buffered anywhere else), so
-		// beforeRecovery can read all of it directly before truncation removes it.
-		options.beforeRecovery({ pins: pinMap, stores: manifest.stores });
-
-		// Rewind every store's cursor to its last durable pin. HashMapStore's
-		// truncate restores its own bucket heads from the links' prevIndex
-		// chain, so no cross-store help is needed for headerhash/txid/pubkey —
-		// only the effects the beforeRecovery hook just undid had escaped to
-		// other stores.
 		for (const { name, pin } of pins) {
 			const store = manifest.storeMap.get(name);
 			if (!store) throw new Error(`Pinned store "${name}" does not exist.`);
-			if (store.size() > pin) store.truncate(pin);
+			store.recover(pin);
 		}
+
 		return manifest;
 	}
 
@@ -89,7 +69,7 @@ export class Manifest<T extends ManifestStores> implements Disposable {
 			this.db.exec("BEGIN IMMEDIATE;");
 			for (const [name, store] of this.storeMap) {
 				store.sync();
-				this.pinQuery.run({ name, size: store.size() });
+				this.pinQuery.run({ name, pin: store.snapshot() });
 			}
 			this.db.exec("COMMIT;");
 		} catch (reason) {

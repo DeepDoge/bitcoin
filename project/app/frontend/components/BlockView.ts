@@ -13,6 +13,7 @@ import {
 import { Block } from "~/routes.ts";
 import { SECOND } from "@project/utils";
 import { difficultyFromHeader } from "@project/bitcoin";
+import { TxList } from "~/frontend/components/TxList.ts";
 
 export function BlockView(block: Block) {
 	const { a, article, header, h1, dl, dt, dd, div, section, h2, code, time } = tags;
@@ -22,7 +23,7 @@ export function BlockView(block: Block) {
 	const prevHashHex = formatHash(block.header.prevHash);
 	const timestamp = new Date(block.header.timestamp * SECOND);
 
-	// Summary (tx count, reward, coinbase scriptSig) now lives in block.info.
+	// Summary (tx count, fees, coinbase scriptSig) now lives in block.info.
 	const info = block.info;
 
 	const row = (term: string, ...value: Parameters<ReturnType<typeof dd>["append$"]>) =>
@@ -58,7 +59,7 @@ export function BlockView(block: Block) {
 				info
 					? div({ class: "summary-rows" }).append$(
 						row("Transactions", formatBlockHeight(info.txCount)),
-						row("Reward", formatBitcoin(BigInt(info.reward))),
+						row("Fees", formatBitcoin(BigInt(info.fees))),
 						row(
 							"Coinbase",
 							code({ class: "hash" }).textContent(
@@ -69,6 +70,7 @@ export function BlockView(block: Block) {
 					: div({ class: "empty" }).textContent("No summary available"),
 			),
 		),
+		TxList({ hashOrHeight: `${block.height}`, txCount: info ? info.txCount : 0 }),
 	);
 
 	return self;
