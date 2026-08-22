@@ -58,8 +58,8 @@ const AppStyle = css`
 		display: block grid;
 		min-block-size: 100dvb;
 
-		grid-template-areas: "main header";
-		grid-template-columns: 1fr minmax(0, 30em);
+		grid-template-areas: "header main";
+		grid-template-columns: minmax(0, 30em) 1fr;
 	}
 
 	main {
