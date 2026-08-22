@@ -1,4 +1,4 @@
-import { ref, sync, tags } from "@purifyjs/core";
+import { Member, ref, sync, tags } from "@purifyjs/core";
 import { api } from "~/frontend/api.ts";
 import { css } from "~/frontend/utils/dom/css.ts";
 import { useReplaceChildren } from "~/frontend/utils/dom/bind.ts";
@@ -7,13 +7,13 @@ import { TxSummary } from "~/routes.ts";
 
 const PAGE = 50;
 
-export function TxList(props: { hashOrHeight: string; txCount: number }) {
+export function TxList(props: { hashOrHeight: string | number | bigint; txCount: number }) {
 	const { a, section, h2, ol, li, div, span, button } = tags;
 
 	const from = ref(0);
 	const total = props.txCount;
 
-	const rows = sync<(HTMLOListElement | null)>((set) => {
+	const rows = sync<Member>((set) => {
 		let cancelled = false;
 		let token = 0;
 		const unfollow = from.follow(async (from) => {
@@ -31,9 +31,11 @@ export function TxList(props: { hashOrHeight: string; txCount: number }) {
 				params: { pathname: { hashOrHeight: props.hashOrHeight }, search: { from: `${from}`, take: `${take}` } },
 			});
 			if (cancelled || myToken !== token) return;
-			set(ol().append$(
-				...txs.map((tx, i) => TxRow({ tx, index: from + i })),
-			));
+			set(
+				ol().append$(
+					txs.map((tx, i) => TxRow({ tx, index: from + i })),
+				),
+			);
 		}, true);
 		return () => {
 			cancelled = true;
@@ -49,7 +51,7 @@ export function TxList(props: { hashOrHeight: string; txCount: number }) {
 		return `${from + 1}\u2013${end} of ${total}`;
 	});
 
-	const self = section().$bind(TxListStyle.useScope());
+	const self = section().ariaLabel("Transactions").$bind(TxListStyle.useScope());
 
 	self.append$(
 		h2().textContent("Transactions"),
@@ -100,9 +102,8 @@ const TxListStyle = css`
 		gap: 0.9em;
 		padding-block: 1.1em;
 		padding-inline: 1.15em;
-		border-radius: var(--panel-radius);
-		background-image: var(--panel-surface);
-		box-shadow: var(--panel-shadow);
+		border-radius: var(--radius-max);
+		background-color: var(--surface);
 	}
 
 	h2 {

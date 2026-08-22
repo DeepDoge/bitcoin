@@ -2,8 +2,8 @@ import { css } from "~/frontend/utils/dom/css.ts";
 
 export const GlobalStyle = css`
 	:root {
-		--base: hsl(240, 12%, 11%);
-		--pop: hsl(0, 0%, 96%);
+		--base: #0b0b0d;
+		--pop: #f2f2f5;
 
 		--accent-base: hsl(33, 83%, 50%);
 		--accent-pop: hsl(36, 46%, 98%);
@@ -14,14 +14,12 @@ export const GlobalStyle = css`
 		--radius-min: 0.35em;
 		--radius-max: 0.75em;
 
-		--panel-radius: var(--radius-max);
-		--panel-surface: linear-gradient(to bottom, color-mix(in srgb, var(--base), currentcolor 2%) 0%, var(--base) 100%);
-		--panel-shadow: inset 0 0.06em 0 0 color-mix(in srgb, currentcolor 9%, transparent), inset 0 -0.14em 10px -0.25em color-mix(in srgb, black 45%, transparent);
+		--surface: color-mix(in srgb, transparent, #d2d2ff 4%);
 	}
 
 	:root {
 		color-scheme: dark;
-		font-family: ui-monospace, "SF Mono", "JetBrains Mono", "Cascadia Code", Menlo, Consolas, monospace;
+		font-family: monospace;
 		line-height: 1.4;
 		font-size: 1rem;
 		accent-color: var(--accent-base);
@@ -61,5 +59,21 @@ export const GlobalStyle = css`
 	ul {
 		list-style: none;
 		padding: 0;
+	}
+
+	h1,
+	h2,
+	h3,
+	h4,
+	h6,
+	h6 {
+		font: inherit;
+	}
+
+	hr {
+		opacity: .2;
+		border: none;
+		block-size: 1px;
+		background-image: currentcolor;
 	}
 `;

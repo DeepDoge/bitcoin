@@ -2,7 +2,7 @@ import { encodeHex } from "@std/encoding";
 import { U32 } from "@nomadshiba/codec";
 import type { LockTime } from "@project/codecs";
 import type { SequenceLock } from "@project/codecs";
-import { DAY, HOUR, MINUTE, MONTH, SECOND, WEEK, YEAR, blockSubsidy } from "@project/utils";
+import { blockSubsidy, DAY, HOUR, MINUTE, MONTH, SECOND, WEEK, YEAR } from "@project/utils";
 import { BigNumberFormat } from "~/frontend/utils/intl/BigNumberFormat.ts";
 
 export const LOCALE = new Intl.Locale("en-US");
@@ -74,9 +74,9 @@ export function formatRelativeTime(to: Date, from: Date = new Date()): string {
 	return relativeTimeFormatter.format(0, "second"); // fallback: "now"
 }
 
-const blockHeightFormatter = new Intl.NumberFormat(LOCALE, { style: "decimal" });
-export function formatBlockHeight(height: number | bigint | Intl.StringNumericLiteral): string {
-	return blockHeightFormatter.format(height);
+const numberFormatter = new Intl.NumberFormat(LOCALE, { style: "decimal" });
+export function formatNumber(height: number | bigint | Intl.StringNumericLiteral): string {
+	return numberFormatter.format(height);
 }
 
 export function formatBlockVersion(version: number): string {

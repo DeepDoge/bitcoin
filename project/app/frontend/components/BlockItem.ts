@@ -2,12 +2,12 @@ import { Sync, tags } from "@purifyjs/core";
 import { encodeHex } from "@std/encoding";
 import { useStyleProperty } from "~/frontend/utils/dom/bind.ts";
 import { css } from "~/frontend/utils/dom/css.ts";
-import { formatBlockHeight, formatBlockVersion, formatBytesDecimal, formatDifficulty } from "~/frontend/utils/format.ts";
+import { formatBlockVersion, formatBytesDecimal, formatDifficulty, formatNumber } from "~/frontend/utils/format.ts";
 import { Block } from "~/routes.ts";
 import { MAX_BLOCK_SIZE } from "@project/utils";
 import { difficultyFromHeader } from "@project/bitcoin";
 
-export function BlockWidget(props: {
+export function BlockItem(props: {
 	block: Block;
 	tipHeight: Sync<number>;
 }) {
@@ -19,7 +19,7 @@ export function BlockWidget(props: {
 	const wireSize = block.info?.wireSize ?? 0;
 	const t = wireSize / MAX_BLOCK_SIZE;
 	const self = a().href(`#/block/${encodeHex(hash)}`)
-		.$bind(BlockWidgetStyle.useScope())
+		.$bind(BlockItemStyle.useScope())
 		.$bind(useStyleProperty("--filled", `${t}`));
 
 	const confirmations = tipHeight.derive((tip) => tip - block.height + 1);
@@ -32,7 +32,7 @@ export function BlockWidget(props: {
 			dl().append$(
 				div({ class: "height" }).append$(
 					dt().textContent("Height"),
-					dd().textContent(formatBlockHeight(block.height)),
+					dd().textContent(formatNumber(block.height)),
 				),
 				div({ class: "size" }).append$(
 					dt().textContent("Size"),
@@ -48,7 +48,7 @@ export function BlockWidget(props: {
 				),
 				div({ class: "confirmations" }).append$(
 					dt().textContent("Confirmations"),
-					dd().textContent(confirmations.derive((n) => `${formatBlockHeight(n)} ${n === 1 ? "block" : "blocks"} ago`)),
+					dd().textContent(confirmations.derive((n) => `${formatNumber(n)} ${n === 1 ? "block" : "blocks"} ago`)),
 				),
 			),
 		),
@@ -57,7 +57,7 @@ export function BlockWidget(props: {
 	return self;
 }
 
-const BlockWidgetStyle = css`
+const BlockItemStyle = css`
 	:scope {
 		display: block grid;
 		color: inherit;
@@ -80,10 +80,8 @@ const BlockWidgetStyle = css`
 
 		padding-block: 1.05em;
 		padding-inline: 1.15em;
-		border-radius: var(--panel-radius);
-
-		background-image: var(--panel-surface);
-		box-shadow: var(--panel-shadow);
+		border-radius: var(--radius-max);
+		background-color: var(--surface);
 
 		isolation: isolate;
 		position: relative;
@@ -188,7 +186,7 @@ const BlockWidgetStyle = css`
 	}
 
 	.height dd {
-		font-size: 2em;
+		font-size: 1.5em;
 		line-height: 1;
 		font-weight: bolder;
 	}

@@ -9,6 +9,7 @@ import { GlobalStyle } from "~/frontend/style.ts";
 import { awaited } from "~/frontend/utils/dom/awaited.ts";
 import { useReplaceChildren } from "~/frontend/utils/dom/bind.ts";
 import { css } from "~/frontend/utils/dom/css.ts";
+import { unroll } from "~/frontend/utils/dom/unroll.ts";
 
 await import("@ungap/custom-elements");
 
@@ -42,7 +43,7 @@ function App() {
 					.then((tx) => (tx ? TxView(tx) : null)),
 			);
 		}
-	});
+	}).pipe(unroll);
 
 	self.append$(
 		header().$bind(useReplaceChildren(awaited(ChainTimeline(), progress()))),
@@ -65,13 +66,19 @@ const AppStyle = css`
 		grid-area: main;
 		container-type: inline-size;
 		display: block grid;
-		justify-items: center;
+		align-content: start;
+
+		padding-block: 3em;
+		padding-inline: 3.25em;
 	}
 
 	header {
 		grid-area: header;
 		display: block grid;
 		container-type: inline-size;
+		max-block-size: 100dvb;
+		position: sticky;
+		inset-block-start: 0;
 	}
 `;
 

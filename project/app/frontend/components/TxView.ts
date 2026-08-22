@@ -1,13 +1,7 @@
 import { tags } from "@purifyjs/core";
 import { encodeHex } from "@std/encoding";
 import { css } from "~/frontend/utils/dom/css.ts";
-import {
-	formatBitcoin,
-	formatBytesDecimal,
-	formatHash,
-	formatLocktime,
-	formatSequence,
-} from "~/frontend/utils/format.ts";
+import { formatBitcoin, formatBytesDecimal, formatHash, formatLocktime, formatSequence } from "~/frontend/utils/format.ts";
 import { Tx } from "~/routes.ts";
 
 export function TxView(tx: Tx) {
@@ -85,13 +79,11 @@ function InputView(props: { input: Tx["inputs"][number]; index: number }) {
 		dl().append$(
 			div().append$(
 				dt().textContent("Previous"),
-				isCoinbase
-					? dd().textContent("Coinbase")
-					: dd().append$(
-						a({ class: "hash" })
-							.href(`#/tx/${txIdHex}`)
-							.textContent(`${txIdHex}:${input.prevOut.output}`),
-					),
+				isCoinbase ? dd().textContent("Coinbase") : dd().append$(
+					a({ class: "hash" })
+						.href(`#/tx/${txIdHex}`)
+						.textContent(`${txIdHex}:${input.prevOut.output}`),
+				),
 			),
 			div().append$(dt().textContent("ScriptSig"), dd().append$(code({ class: "script" }).textContent(encodeHex(input.scriptSig)))),
 			div().append$(dt().textContent("Sequence"), dd().textContent(formatSequence(input.sequence))),
@@ -111,7 +103,10 @@ function OutputView(props: { output: Tx["outputs"][number]; index: number }) {
 		span({ class: "index" }).textContent(`${index}`),
 		dl().append$(
 			div().append$(dt().textContent("Value"), dd().textContent(formatBitcoin(output.value))),
-			div().append$(dt().textContent("ScriptPubKey"), dd().append$(code({ class: "script" }).textContent(encodeHex(output.scriptPubKey)))),
+			div().append$(
+				dt().textContent("ScriptPubKey"),
+				dd().append$(code({ class: "script" }).textContent(encodeHex(output.scriptPubKey))),
+			),
 		),
 	);
 
@@ -185,9 +180,8 @@ const TxViewStyle = css`
 		gap: 0.35em;
 		padding-block: 1.35em;
 		padding-inline: 1.25em;
-		border-radius: var(--panel-radius);
-		background-image: var(--panel-surface);
-		box-shadow: var(--panel-shadow);
+		border-radius: var(--radius-max);
+		background-color: var(--surface);
 	}
 
 	.eyebrow {
@@ -239,9 +233,8 @@ const TxViewStyle = css`
 		gap: 0.9em;
 		padding-block: 1.1em;
 		padding-inline: 1.15em;
-		border-radius: var(--panel-radius);
-		background-image: var(--panel-surface);
-		box-shadow: var(--panel-shadow);
+		border-radius: var(--radius-max);
+		background-color: var(--surface);
 	}
 
 	dl,

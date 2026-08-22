@@ -1,76 +1,63 @@
+import { MAX_BLOCK_SIZE, SECOND } from "@project/utils";
 import { tags } from "@purifyjs/core";
 import { encodeHex } from "@std/encoding";
-import { css } from "~/frontend/utils/dom/css.ts";
-import {
-	formatBitcoin,
-	formatBlockHeight,
-	formatBlockVersion,
-	formatBytesDecimal,
-	formatDateTime,
-	formatDifficulty,
-	formatHash,
-} from "~/frontend/utils/format.ts";
-import { Block } from "~/routes.ts";
-import { SECOND } from "@project/utils";
-import { difficultyFromHeader } from "@project/bitcoin";
+import { HashCode } from "~/frontend/components/HashCode.ts";
 import { TxList } from "~/frontend/components/TxList.ts";
+import { css } from "~/frontend/utils/dom/css.ts";
+import { formatBytesDecimal, formatHash, formatNumber, formatRelativeTime, LOCALE } from "~/frontend/utils/format.ts";
+import { Block } from "~/routes.ts";
+
+const d = new Intl.DateTimeFormat(LOCALE, { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
+const t = new Intl.DateTimeFormat(LOCALE, { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "UTC" });
+const formatTimestamp = (timestamp: Date) => `${d.format(timestamp)} · ${t.format(timestamp)} UTC`;
 
 export function BlockView(block: Block) {
-	const { a, article, header, h1, dl, dt, dd, div, section, h2, code, time } = tags;
+	const { a, article, header, h1, small, dl, dt, dd, label, meter, span, strong, section, h2, code, time } = tags;
 
 	const hash = block.header.hash().toReversed();
 	const hashHex = encodeHex(hash);
 	const prevHashHex = formatHash(block.header.prevHash);
 	const timestamp = new Date(block.header.timestamp * SECOND);
 
-	// Summary (tx count, fees, coinbase scriptSig) now lives in block.info.
-	const info = block.info;
-
-	const row = (term: string, ...value: Parameters<ReturnType<typeof dd>["append$"]>) =>
-		div().append$(dt().textContent(term), dd().append$(...value));
+	const meterValue = MAX_BLOCK_SIZE - (block.info?.wireSize ?? 0);
+	const meterLabel = block.info ? `${(100 * ((MAX_BLOCK_SIZE - block.info.wireSize) / MAX_BLOCK_SIZE)).toFixed(0)}% headroom` : "-";
 
 	const self = article().$bind(BlockViewStyle.useScope());
 
 	self.append$(
 		header().append$(
-			div({ class: "eyebrow" }).textContent("Block"),
-			h1().textContent(formatBlockHeight(block.height)),
-			code({ class: "hash" }).textContent(hashHex),
-		),
-		section().append$(
-			h2().textContent("Header"),
-			dl().append$(
-				row("Version", formatBlockVersion(block.header.version)),
-				row("Timestamp", time().dateTime(timestamp.toISOString()).textContent(formatDateTime(timestamp))),
-				row("Difficulty", formatDifficulty(difficultyFromHeader(block.header))),
-				row("Bits", `0x${block.header.bits.toString(16)}`),
-				row("Nonce", `${block.header.nonce}`),
-				row("Size", info ? formatBytesDecimal(info.wireSize) : "unknown"),
-				row("Merkle root", code({ class: "hash" }).textContent(formatHash(block.header.merkleRoot))),
-				row(
-					"Previous block",
-					a({ class: "hash" }).href(`#/block/${prevHashHex}`).textContent(prevHashHex),
-				),
+			h1().append$(
+				small().textContent("Block"),
+				strong().textContent(formatNumber(block.height)),
+				HashCode(hashHex),
+			),
+			time().dateTime(timestamp.toISOString()).append$(
+				strong().textContent(formatRelativeTime(timestamp)),
+				small().textContent(formatTimestamp(timestamp)),
 			),
 		),
-		section().append$(
-			h2().textContent("Summary"),
-			dl().append$(
-				info
-					? div({ class: "summary-rows" }).append$(
-						row("Transactions", formatBlockHeight(info.txCount)),
-						row("Fees", formatBitcoin(BigInt(info.fees))),
-						row(
-							"Coinbase",
-							code({ class: "hash" }).textContent(
-								info.coinbaseScriptSig.length ? new TextDecoder().decode(info.coinbaseScriptSig) : "(empty)",
-							),
-						),
-					)
-					: div({ class: "empty" }).textContent("No summary available"),
+		section().id("block-pow").ariaLabel("Proof of work").append$(
+			h2().textContent("Proof of work"),
+		),
+		section().id("block-content").ariaLabel("Content").append$(
+			h2().textContent("Content"),
+			span({ class: "count" }).append$(
+				strong().textContent(block.info ? formatNumber(block.info.txCount) : "-"),
+				small().textContent("txs"),
+			),
+			small({ class: "size" }).textContent(`${block.info ? formatBytesDecimal(block.info.wireSize) : "-"} size`),
+			label().append$(
+				meter().max(MAX_BLOCK_SIZE).value(meterValue),
+				span().textContent(meterLabel),
 			),
 		),
-		TxList({ hashOrHeight: `${block.height}`, txCount: info ? info.txCount : 0 }),
+		section().id("block-reward").ariaLabel("Reward").append$(
+			h2().textContent("Reward"),
+		),
+		section().id("block-coinbase").ariaLabel("Coinbase signature").append$(
+			h2().textContent("Coinbase signature"),
+		),
+		TxList({ hashOrHeight: block.height, txCount: block.info ? block.info.txCount : 0 }).$bind(TransactionSectionStyle.useScope()),
 	);
 
 	return self;
@@ -80,37 +67,71 @@ const BlockViewStyle = css`
 	:scope {
 		display: block grid;
 		gap: 1.5em;
-		align-content: start;
-		padding-block: 1.5em;
-		padding-inline: 1.25em;
-		inline-size: 100%;
-		max-inline-size: 60em;
+
+		grid-template-columns: repeat(3, 1fr);
+
+		@container (inline-size < 60em) {
+			grid-template-columns: 1fr;
+		}
 	}
 
 	header {
+		grid-column: 1 / -1;
 		display: block grid;
-		gap: 0.35em;
-		padding-block: 1.35em;
-		padding-inline: 1.25em;
-		border-radius: var(--panel-radius);
-		background-image: var(--panel-surface);
-		box-shadow: var(--panel-shadow);
+		grid-template-columns: minmax(0, 20em) 1fr;
+		gap: 1em;
 	}
 
-	.eyebrow {
-		font-size: 0.7em;
-		letter-spacing: 0.16em;
-		text-transform: uppercase;
-		color: color-mix(in srgb, currentcolor 50%, transparent);
+	header h1 {
+		display: block grid;
+		gap: .75em;
+		justify-items: start;
+
+		small {
+			opacity: .5;
+			text-box: trim-both cap alphabetic;
+			text-transform: uppercase;
+			font-size: .9em;
+		}
+
+		strong {
+			font-variant-numeric: tabular-nums slashed-zero;
+			font-size: 3.5em;
+			text-box: trim-both cap alphabetic;
+			text-transform: uppercase;
+			/* Pull left by the digit's side bearing so its ink aligns with the label above.
+			In em, so it tracks font-size. Safe as a constant: tabular-nums gives every
+			digit the same bearing, so no per-glyph drift. Tune against the rendered "0". */
+			margin-inline-start: -0.05em;
+		}
 	}
 
-	h1 {
-		font-size: 2.4em;
-		line-height: 1;
-		font-variant-numeric: tabular-nums;
-		background-image: linear-gradient(180deg, var(--pop), color-mix(in srgb, var(--pop), var(--base) 45%));
-		background-clip: text;
-		color: transparent;
+	header time {
+		display: block grid;
+		gap: .75em;
+		text-align: end;
+		align-content: start;
+
+		small {
+			opacity: .5;
+			text-box: trim-both cap alphabetic;
+			font-size: .75em;
+		}
+
+		strong {
+			font-weight: normal;
+			text-box: trim-both cap alphabetic;
+		}
+	}
+
+	@container (inline-size < 40em) {
+		header {
+			grid-template-columns: 1fr;
+		}
+
+		header time {
+			text-align: center;
+		}
 	}
 
 	h2 {
@@ -130,55 +151,23 @@ const BlockViewStyle = css`
 		background-image: linear-gradient(to right, color-mix(in srgb, currentcolor 20%, transparent), transparent);
 	}
 
-	.hash {
-		font-size: 0.85em;
-		word-break: break-all;
-		color: color-mix(in srgb, currentcolor 82%, transparent);
-	}
-
-	a.hash:hover {
-		color: var(--accent-base);
-	}
-
 	section {
 		display: block grid;
 		gap: 0.9em;
+		align-content: start;
 		padding-block: 1.1em;
 		padding-inline: 1.15em;
-		border-radius: var(--panel-radius);
-		background-image: var(--panel-surface);
-		box-shadow: var(--panel-shadow);
+		border-radius: var(--radius-max);
+		background-color: var(--surface);
 	}
 
-	dl,
-	.summary-rows {
-		display: block grid;
-		gap: 0.65em 1.25em;
-		grid-template-columns: repeat(auto-fit, minmax(min(100%, 16em), 1fr));
+	section#block-coinbase {
+		grid-column: 1 / -1;
 	}
+`;
 
-	dl > div,
-	.summary-rows > div {
-		display: block grid;
-		gap: 0.15em;
-		overflow: hidden;
-	}
-
-	dt {
-		font-size: 0.65em;
-		letter-spacing: 0.14em;
-		text-transform: uppercase;
-		color: color-mix(in srgb, currentcolor 50%, transparent);
-	}
-
-	dd {
-		font-variant-numeric: tabular-nums;
-		overflow: hidden;
-		text-overflow: ellipsis;
-	}
-
-	.empty {
-		font-size: 0.85em;
-		color: color-mix(in srgb, currentcolor 55%, transparent);
+const TransactionSectionStyle = css`
+	:scope {
+		grid-column: 1 / -1;
 	}
 `;

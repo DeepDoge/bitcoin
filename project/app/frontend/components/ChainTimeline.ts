@@ -1,6 +1,6 @@
 import { Builder, combine, type Lifecycle, ref, Sync, tags } from "@purifyjs/core";
 import { api } from "~/frontend/api.ts";
-import { BlockWidget } from "~/frontend/components/BlockWidget.ts";
+import { BlockItem } from "~/frontend/components/BlockItem.ts";
 import { ChainScrollbar } from "~/frontend/components/ChainScrollbar.ts";
 import { awaited } from "~/frontend/utils/dom/awaited.ts";
 import { useReplaceChildren, useStyleProperty } from "~/frontend/utils/dom/bind.ts";
@@ -109,7 +109,7 @@ export async function ChainTimeline() {
 		const item = li()
 			.ariaSetSize(total.derive((total) => `${total}` as const))
 			.ariaBusy(block.derive((b) => (b ? null : "true")))
-			.$bind(useReplaceChildren(block.derive((block) => (block ? BlockWidget({ block, tipHeight }) : ""))));
+			.$bind(useReplaceChildren(block.derive((block) => (block ? BlockItem({ block, tipHeight }) : ""))));
 		const slot: Slot = { item, height };
 		slots.push(slot);
 		list.append$(item);
@@ -182,7 +182,7 @@ export async function ChainTimeline() {
 	// Off-axis measuring row: gives us the row pitch without rendering a card.
 	const probe = li({ class: "probe" }).ariaHidden("true")
 		.$bind(useMeasureBlockSize(rowSize))
-		.$bind(useReplaceChildren(tip.derive((block) => block ? BlockWidget({ block, tipHeight }) : null)));
+		.$bind(useReplaceChildren(tip.derive((block) => block ? BlockItem({ block, tipHeight }) : null)));
 	list.append$(probe);
 
 	const self = section({ class: "surface" })
@@ -282,7 +282,7 @@ const ChainTimelineStyle = css`
 		position: relative;
 		box-sizing: border-box;
 		block-size: var(--row-size);
-		padding-block: var(--row-gap);
+		padding-block-start: var(--row-gap);
 		overflow: clip; /* a card outgrowing its track is a bug, not a reflow */
 	}
 
@@ -311,8 +311,9 @@ const ChainTimelineStyle = css`
 		content: "";
 		position: absolute;
 		inset-block: var(--row-gap);
+		inset-block-end: 0;
 		inset-inline: 0;
-		border-radius: var(--panel-radius);
+		border-radius: var(--radius-max);
 		background-color: var(--row-placeholder);
 		opacity: 0;
 		transition: opacity 300ms ease-out 60ms;
