@@ -40,6 +40,7 @@ export const GlobalStyle = css`
 
 	html {
 		container-type: inline-size;
+		scrollbar-gutter: stable;
 	}
 
 	body {
