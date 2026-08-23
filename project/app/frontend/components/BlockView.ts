@@ -75,10 +75,10 @@ export function BlockView(block: Block) {
 				meter().max(MAX_BLOCK_SIZE).value(headroom),
 				span().textContent(`headroom: ${headroomFormatted}%`),
 			),
-			label().append$(
+			/* label().append$(
 				meter().max(100_000).value(efficiencyRatio * 100_000),
 				span().textContent(`efficiency: ${(efficiencyRatio * 100).toFixed(0)}%`),
-			),
+			), */
 		),
 		section().id("block-reward").ariaLabel("Reward").append$(
 			h2().textContent("Reward"),
