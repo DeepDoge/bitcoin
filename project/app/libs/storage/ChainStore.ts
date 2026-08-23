@@ -28,25 +28,12 @@ const TX_RESTORE_WINDOW_LOG_MAX = 27;
 const OUTPUT_MIN_CHUNK_SIZE = 500 * MB;
 
 const TXID_ENTRIES_CHUNK_SIZE = 500 * MB;
-// Pre-sized large enough that the txid hashmap does not rehash during a typical
-// IBD run: each rehash is an O(entryCount) synchronous pass over every entry
-// (HashMapStore.rebuild) and blocks the single-writer commit thread for tens
-// of seconds at multi-million entry counts (observed ~50s at 8M entries). At
-// load factor 0.75, 64M buckets holds ~48M entries before the first rehash.
-// Cost: 64M * 6 bytes/slot = 384 MB on disk (mmap-backed). Full mainnet sync
-// (~900M txids) would need ~1.2B buckets (~7 GB) for zero rehash — not seeded
-// here due to storage cost; revisit (or offload rehash off the commit thread)
-// if late-IBD storms reappear.
-const TXID_BUCKETS_INITIAL_SIZE = 67_108_864;
+const TXID_BUCKETS_INITIAL_SIZE = 268_435_456;
 const TXID_BUCKETS_MIN_CHUNK_SIZE = 500 * MB;
 const TXID_LINKS_MIN_CHUNK_SIZE = 500 * MB;
 
 const PUBKEY_ENTRIES_CHUNK_SIZE = 1 * GB;
-// Same rationale as TXID_BUCKETS_INITIAL_SIZE: avoid synchronous rehash storms
-// on the commit thread. Unique scriptPubKeys grow slower than txids; 16M
-// buckets (~12M entries at load 0.75) is enough headroom for a typical IBD run.
-// Cost: 16M * 6 bytes/slot = 96 MB on disk.
-const PUBKEY_BUCKETS_INITIAL_SIZE = 16_777_216;
+const PUBKEY_BUCKETS_INITIAL_SIZE = 268_435_456;
 const PUBKEY_BUCKETS_MIN_CHUNK_SIZE = 500 * MB;
 const PUBKEY_LINKS_MIN_CHUNK_SIZE = 500 * MB;
 
@@ -66,15 +53,6 @@ export type ChainStoreOptions = {
 	loadFactor: LoadFactorOptions;
 };
 
-// Holds everything that must recover to the same block-height snapshot
-// together: block records, tx bytes, the txid/pubkey indexes, output rows,
-// and spender marks. snapshot()/recover() are height-based (not raw byte
-// offsets) so that a single pin point always corresponds to a whole,
-// consistent block boundary across every sub-store here — the block store is
-// always the LAST thing written per height (see chain/worker.ts's pipeline:
-// block.reveal happens after txid/output/spender/pubkey are committed), so if
-// a height is visible in `block`, everything else for it is guaranteed
-// correct and committed too. recover() relies on exactly that invariant.
 export class ChainStore extends Store implements Disposable {
 	public readonly path: string;
 	public readonly tx: BlobStore;
@@ -177,11 +155,6 @@ export class ChainStore extends Store implements Disposable {
 		const currentBlockCount = this.block.size();
 		if (blockHeight >= currentBlockCount) return;
 
-		// The block at blockHeight is the FIRST doomed block (heights
-		// [0, blockHeight) are kept). Its txPointer is where its txs start
-		// in the tx blob (past the StoredTxs VarInt counter). Recovery
-		// iterates block-by-block using each block's StoredBlockInfo to find
-		// its txs and tx count.
 		const blockInfo = this.block.get(blockHeight);
 		if (!blockInfo) throw new Error(`recover: block at height ${blockHeight} not found`);
 		const txPin = blockInfo.txPointer;
@@ -192,17 +165,15 @@ export class ChainStore extends Store implements Disposable {
 			return;
 		}
 
-		console.log(`[chainstore ${this.path}] recovering: rewinding block ${currentBlockCount} -> ${blockHeight}, tx ${currentTxSize} -> ${txPin}`);
+		console.log(
+			`[chainstore ${this.path}] recovering: rewinding block ${currentBlockCount} -> ${blockHeight}, tx ${currentTxSize} -> ${txPin}`,
+		);
 
 		const originalOutputCount = this.output.size();
 		let doomedTxCount = 0;
 		let doomedOutputCount = 0;
 		const doomedOutputPubkeys: { relativeOutputIndex: number; pubkeyIndex: number }[] = [];
 
-		// Iterate doomed txs block-by-block. Each block's txs are stored as
-		// a StoredTxs record (VarInt counter + StoredTx[]) in the tx blob.
-		// blockInfo.txPointer points past the counter to the first StoredTx,
-		// and blockInfo.txCount tells us how many txs to read.
 		for (let doomedHeight = blockHeight; doomedHeight < currentBlockCount; doomedHeight++) {
 			const doomedBlockInfo = this.block.get(doomedHeight);
 			if (!doomedBlockInfo) break;
@@ -241,12 +212,6 @@ export class ChainStore extends Store implements Disposable {
 			const absoluteOutputIndex = newOutputCount + relativeOutputIndex;
 			const outputRow = this.output.get(absoluteOutputIndex);
 			if (!outputRow) continue;
-			// prevSamePubkeyOutputIndex is null for the first output of a
-			// pubkey in the doomed range (or coinbase outputs). Skip those
-			// — there's no prior output head to restore. With batched
-			// pinning this can also happen for outputs whose prior was in
-			// the committed range; the pubkeyOutputHead for that pubkey
-			// will be set by a different doomed output or is already correct.
 			if (outputRow.prevSamePubkeyOutputIndex === null) continue;
 			this.pubkeyOutputHead.set(pubkeyIndex, outputRow.prevSamePubkeyOutputIndex);
 		}
