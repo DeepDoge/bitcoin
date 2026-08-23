@@ -14,6 +14,7 @@ import {
 	LOCALE,
 } from "~/frontend/utils/format.ts";
 import { Block } from "~/routes.ts";
+import { CoinbaseScriptSig } from "~/frontend/components/CoinbaseScriptSig.ts";
 
 const d = new Intl.DateTimeFormat(LOCALE, { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
 const t = new Intl.DateTimeFormat(LOCALE, { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "UTC" });
@@ -76,7 +77,7 @@ export function BlockView(block: Block) {
 		),
 		section().id("block-coinbase").ariaLabel("Coinbase signature").append$(
 			h2().textContent("Coinbase signature"),
-			code().textContent(block.info ? formatCoinbaseScriptSig(block.info.coinbaseScriptSig) : "-"),
+			block.info ? CoinbaseScriptSig(block.info.coinbaseScriptSig) : "-",
 		),
 		TxList({ hashOrHeight: block.height, txCount: block.info ? block.info.txCount : 0 }).$bind(TransactionSectionStyle.useScope()),
 	);
