@@ -7,6 +7,7 @@ import { StoredTx, StoredTxInput, StoredTxOutput, WireBlockHeader, WireBlockHead
 import { Codec } from "@nomadshiba/codec";
 import { Queue } from "@project/collections";
 import { blockSubsidy, COINBASE_VOUT, MAX_BLOCK_SIZE, SECOND } from "@project/utils";
+import { delay } from "@std/async/delay";
 
 console.log("[chain] booting");
 
@@ -272,7 +273,7 @@ self.onmessage = async (event) => {
 		try {
 			const message = p2pMessageQueue.peek();
 			if (!message) {
-				await new Promise<void>((resolve) => queueMicrotask(resolve));
+				await delay(0);
 				continue;
 			}
 			switch (message.type) {

@@ -1,17 +1,17 @@
 import { tags } from "@purifyjs/core";
 import { css } from "~/frontend/utils/dom/css.ts";
 
-export function HashCode(input: string, suffixLength = 8) {
-	const { span, code } = tags;
+export function EllipsisWithSuffix(input: string, suffixLength = 8) {
+	const { span } = tags;
 	const prefix = input.slice(0, -suffixLength);
 	const suffix = input.slice(-suffixLength);
-	return code().$bind(HashCodeStyle.useScope()).append$(
+	return span().$bind(EllipsisWithSuffixStyle.useScope()).append$(
 		span().textContent(prefix),
 		span().textContent(suffix),
 	);
 }
 
-const HashCodeStyle = css`
+const EllipsisWithSuffixStyle = css`
 	:scope {
 		display: block grid;
 		justify-content: start;

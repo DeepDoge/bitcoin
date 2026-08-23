@@ -1,10 +1,18 @@
 import { MAX_BLOCK_SIZE, SECOND } from "@project/utils";
 import { tags } from "@purifyjs/core";
 import { encodeHex } from "@std/encoding";
-import { HashCode } from "~/frontend/components/HashCode.ts";
+import { EllipsisWithSuffix } from "~/frontend/components/EllipsisWithSuffix.ts";
 import { TxList } from "~/frontend/components/TxList.ts";
+import { TextTrimMixin, WideLetterSpacingMixin } from "~/frontend/style.ts";
 import { css } from "~/frontend/utils/dom/css.ts";
-import { formatBytesDecimal, formatHash, formatNumber, formatRelativeTime, LOCALE } from "~/frontend/utils/format.ts";
+import {
+	formatBytesDecimal,
+	formatCoinbaseScriptSig,
+	formatHash,
+	formatNumber,
+	formatRelativeTime,
+	LOCALE,
+} from "~/frontend/utils/format.ts";
 import { Block } from "~/routes.ts";
 
 const d = new Intl.DateTimeFormat(LOCALE, { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
@@ -12,7 +20,7 @@ const t = new Intl.DateTimeFormat(LOCALE, { hour: "2-digit", minute: "2-digit", 
 const formatTimestamp = (timestamp: Date) => `${d.format(timestamp)} · ${t.format(timestamp)} UTC`;
 
 export function BlockView(block: Block) {
-	const { a, article, header, h1, small, dl, dt, dd, label, meter, span, strong, section, h2, code, time } = tags;
+	const { a, article, header, h1, small, data, label, meter, span, strong, section, h2, code, time } = tags;
 
 	const hash = block.header.hash().toReversed();
 	const hashHex = encodeHex(hash);
@@ -20,7 +28,7 @@ export function BlockView(block: Block) {
 	const timestamp = new Date(block.header.timestamp * SECOND);
 
 	const meterValue = MAX_BLOCK_SIZE - (block.info?.wireSize ?? 0);
-	const meterLabel = block.info ? `${(100 * ((MAX_BLOCK_SIZE - block.info.wireSize) / MAX_BLOCK_SIZE)).toFixed(0)}% headroom` : "-";
+	const meterFormatted = block.info ? (100 * (meterValue / MAX_BLOCK_SIZE)).toFixed(0) : "-";
 
 	const self = article().$bind(BlockViewStyle.useScope());
 
@@ -29,7 +37,12 @@ export function BlockView(block: Block) {
 			h1().append$(
 				small().textContent("Block"),
 				strong().textContent(formatNumber(block.height)),
-				HashCode(hashHex),
+				/* TODO:
+					later when you have toast alerts,
+				 	have a seperate copy function that we import and use here,
+					that also shows "copied" alert
+				*/
+				code().onclick(() => navigator.clipboard.writeText(hashHex)).append$(EllipsisWithSuffix(hashHex)),
 			),
 			time().dateTime(timestamp.toISOString()).append$(
 				strong().textContent(formatRelativeTime(timestamp)),
@@ -40,15 +53,22 @@ export function BlockView(block: Block) {
 			h2().textContent("Proof of work"),
 		),
 		section().id("block-content").ariaLabel("Content").append$(
-			h2().textContent("Content"),
+			h2().textContent("Contents"),
 			span({ class: "count" }).append$(
-				strong().textContent(block.info ? formatNumber(block.info.txCount) : "-"),
-				small().textContent("txs"),
+				strong({ class: "value" }).append$(
+					data()
+						.value(block.info ? String(block.info.txCount) : "")
+						.textContent(block.info ? formatNumber(block.info.txCount) : "-"),
+				),
+				small({ class: "unit" }).textContent("txs"),
+				small({ class: "size" }).append$(
+					data().value(block.info ? String(block.info.wireSize) : "")
+						.textContent(block.info ? `${formatBytesDecimal(block.info.wireSize)} on wire` : "-"),
+				),
 			),
-			small({ class: "size" }).textContent(`${block.info ? formatBytesDecimal(block.info.wireSize) : "-"} size`),
 			label().append$(
 				meter().max(MAX_BLOCK_SIZE).value(meterValue),
-				span().textContent(meterLabel),
+				span().textContent(`headroom: ${meterFormatted}%`),
 			),
 		),
 		section().id("block-reward").ariaLabel("Reward").append$(
@@ -56,6 +76,7 @@ export function BlockView(block: Block) {
 		),
 		section().id("block-coinbase").ariaLabel("Coinbase signature").append$(
 			h2().textContent("Coinbase signature"),
+			code().textContent(block.info ? formatCoinbaseScriptSig(block.info.coinbaseScriptSig) : "-"),
 		),
 		TxList({ hashOrHeight: block.height, txCount: block.info ? block.info.txCount : 0 }).$bind(TransactionSectionStyle.useScope()),
 	);
@@ -89,20 +110,16 @@ const BlockViewStyle = css`
 
 		small {
 			opacity: .5;
-			text-box: trim-both cap alphabetic;
-			text-transform: uppercase;
 			font-size: .9em;
+			${WideLetterSpacingMixin};
+			${TextTrimMixin};
+			text-transform: uppercase;
 		}
 
 		strong {
+			text-box: trim-both cap alphabetic;
 			font-variant-numeric: tabular-nums slashed-zero;
 			font-size: 3.5em;
-			text-box: trim-both cap alphabetic;
-			text-transform: uppercase;
-			/* Pull left by the digit's side bearing so its ink aligns with the label above.
-			In em, so it tracks font-size. Safe as a constant: tabular-nums gives every
-			digit the same bearing, so no per-glyph drift. Tune against the rendered "0". */
-			margin-inline-start: -0.05em;
 		}
 	}
 
@@ -134,15 +151,27 @@ const BlockViewStyle = css`
 		}
 	}
 
+	section {
+		display: block grid;
+		align-content: start;
+		gap: 1.5em;
+		padding-block: 1.5em;
+		padding-inline: 2em;
+		border-radius: var(--radius-max);
+		background-color: var(--surface);
+	}
+
 	h2 {
 		display: block grid;
 		grid-template-columns: auto minmax(0, 1fr);
 		align-items: center;
 		gap: 0.75em;
 		font-size: 0.8em;
-		letter-spacing: 0.14em;
-		text-transform: uppercase;
 		color: color-mix(in srgb, currentcolor 60%, transparent);
+
+		${WideLetterSpacingMixin};
+		${TextTrimMixin};
+		text-transform: uppercase;
 	}
 
 	h2::after {
@@ -151,18 +180,56 @@ const BlockViewStyle = css`
 		background-image: linear-gradient(to right, color-mix(in srgb, currentcolor 20%, transparent), transparent);
 	}
 
-	section {
-		display: block grid;
-		gap: 0.9em;
-		align-content: start;
-		padding-block: 1.1em;
-		padding-inline: 1.15em;
-		border-radius: var(--radius-max);
-		background-color: var(--surface);
+	section#block-content {
+		.count {
+			display: block grid;
+			grid-template-columns: auto 1fr;
+			row-gap: 1em;
+			align-items: baseline;
+
+			& > * {
+				${TextTrimMixin};
+			}
+
+			.value {
+				font-size: 2.5em;
+			}
+
+			.unit {
+				opacity: 0.65;
+				font-size: 1em;
+			}
+
+			.size {
+				grid-column: 1 / -1;
+				opacity: 0.5;
+				font-size: 1em;
+			}
+		}
+
+		label:has(> meter) {
+			display: block grid;
+			gap: 0.5em;
+
+			color: var(--positive-base);
+
+			span {
+				font-size: 0.8em;
+				${WideLetterSpacingMixin};
+				${TextTrimMixin};
+				text-transform: uppercase;
+			}
+		}
 	}
 
 	section#block-coinbase {
 		grid-column: 1 / -1;
+
+		code {
+			overflow-wrap: break-word;
+			white-space: normal;
+			min-inline-size: 0;
+		}
 	}
 `;
 

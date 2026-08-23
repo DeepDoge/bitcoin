@@ -100,10 +100,6 @@ const TxListStyle = css`
 	:scope {
 		display: block grid;
 		gap: 0.9em;
-		padding-block: 1.1em;
-		padding-inline: 1.15em;
-		border-radius: var(--radius-max);
-		background-color: var(--surface);
 	}
 
 	h2 {

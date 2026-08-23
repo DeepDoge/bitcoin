@@ -1,8 +1,7 @@
-import { encodeHex } from "@std/encoding";
 import { U32 } from "@nomadshiba/codec";
-import type { LockTime } from "@project/codecs";
-import type { SequenceLock } from "@project/codecs";
-import { blockSubsidy, DAY, HOUR, MINUTE, MONTH, SECOND, WEEK, YEAR } from "@project/utils";
+import type { LockTime, SequenceLock } from "@project/codecs";
+import { DAY, HOUR, MINUTE, MONTH, SECOND, WEEK, YEAR } from "@project/utils";
+import { encodeHex } from "@std/encoding";
 import { BigNumberFormat } from "~/frontend/utils/intl/BigNumberFormat.ts";
 
 export const LOCALE = new Intl.Locale("en-US");
@@ -83,18 +82,48 @@ export function formatBlockVersion(version: number): string {
 	return `0x${encodeHex(U32.encode(version))}`;
 }
 
-const difficultyFormatter = new BigNumberFormat(LOCALE, { base: 1000, units: ["", "K", "M", "G", "T", "P", "E", "Z"], separator: "" });
+const difficultyFormatter = new BigNumberFormat(LOCALE);
 export function formatDifficulty(n: number): string {
 	return difficultyFormatter.format(n);
 }
 
-const hashrateFormatter = new BigNumberFormat(LOCALE, { base: 1000, units: ["", "K", "M", "G", "T", "P", "E", "Z"], separator: "" });
+const hashrateFormatter = new BigNumberFormat(LOCALE);
 export function formatHashrate(n: number): string {
 	return hashrateFormatter.format(n);
 }
 
-const btcFormatter = new Intl.NumberFormat(LOCALE, { style: "currency", currency: "BTC" });
-export function formatBitcoin(sats: bigint) {
-	const btc = Number(sats) / 100_000_000;
-	return btcFormatter.format(btc);
+const SATS_PER_BTC = 100_000_000;
+const intFormatter = new Intl.NumberFormat(LOCALE);
+const DECIMAL_SEP = intFormatter.formatToParts(1.1).find((p) => p.type === "decimal")!.value;
+
+export function formatBTC(sats: number): string {
+	const negative = sats < 0;
+	const abs = negative ? -sats : sats;
+	const intPart = Math.floor(abs / SATS_PER_BTC);
+	const fracPart = abs % SATS_PER_BTC;
+	const sign = negative ? "-" : "";
+
+	let decimals: number;
+	if (intPart >= 10 || fracPart === 0) {
+		decimals = 0;
+	} else {
+		const fs = fracPart.toString().padStart(8, "0");
+		const firstNonZero = fs.search(/[^0]/);
+		decimals = intPart > 0 ? 2 : Math.min(8, firstNonZero + 2);
+	}
+
+	const frac = fracPart.toString().padStart(8, "0").slice(0, decimals).replace(/0+$/, "");
+	return `₿${sign}${intFormatter.format(intPart)}${frac ? DECIMAL_SEP + frac : ""}`;
+}
+
+export function formatSats(sats: number): string {
+	return `${intFormatter.format(sats)} sats`;
+}
+
+export function formatBitcoin(sats: number, satsThreshold = 1_000_000): string {
+	return sats < satsThreshold ? formatSats(sats) : formatBTC(sats);
+}
+
+export function formatCoinbaseScriptSig(bytes: Uint8Array): string {
+	return new TextDecoder("utf-8", { fatal: false }).decode(bytes);
 }
