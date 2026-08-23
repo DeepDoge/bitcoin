@@ -1,4 +1,4 @@
-import { MAX_BLOCK_SIZE, SECOND } from "@project/utils";
+import { MAX_BLOCK_SIZE, MIN_STANDARD_TX_NONWITNESS_SIZE, SECOND } from "@project/utils";
 import { tags } from "@purifyjs/core";
 import { encodeHex } from "@std/encoding";
 import { EllipsisWithSuffix } from "~/frontend/components/EllipsisWithSuffix.ts";
@@ -15,6 +15,7 @@ import {
 } from "~/frontend/utils/format.ts";
 import { Block } from "~/routes.ts";
 import { CoinbaseScriptSig } from "~/frontend/components/CoinbaseScriptSig.ts";
+import { WireBlockHeader } from "@project/codecs";
 
 const d = new Intl.DateTimeFormat(LOCALE, { day: "2-digit", month: "short", year: "numeric", timeZone: "UTC" });
 const t = new Intl.DateTimeFormat(LOCALE, { hour: "2-digit", minute: "2-digit", hour12: false, timeZone: "UTC" });
@@ -28,8 +29,11 @@ export function BlockView(block: Block) {
 	const prevHashHex = formatHash(block.header.prevHash);
 	const timestamp = new Date(block.header.timestamp * SECOND);
 
-	const meterValue = MAX_BLOCK_SIZE - (block.info?.wireSize ?? 0);
-	const meterFormatted = block.info ? (100 * (meterValue / MAX_BLOCK_SIZE)).toFixed(0) : "-";
+	const headroom = MAX_BLOCK_SIZE - (block.info?.wireSize ?? 0);
+	const headroomFormatted = block.info ? (100 * (headroom / MAX_BLOCK_SIZE)).toFixed(0) : "-";
+
+	const efficiencyRatio = ((block.info?.txCount ?? 0) * MIN_STANDARD_TX_NONWITNESS_SIZE) /
+		((block.info?.wireSize ?? 0) - WireBlockHeader.stride.size);
 
 	const self = article().$bind(BlockViewStyle.useScope());
 
@@ -68,8 +72,12 @@ export function BlockView(block: Block) {
 				),
 			),
 			label().append$(
-				meter().max(MAX_BLOCK_SIZE).value(meterValue),
-				span().textContent(`headroom: ${meterFormatted}%`),
+				meter().max(MAX_BLOCK_SIZE).value(headroom),
+				span().textContent(`headroom: ${headroomFormatted}%`),
+			),
+			label().append$(
+				meter().max(100_000).value(efficiencyRatio * 100_000),
+				span().textContent(`efficiency: ${(efficiencyRatio * 100).toFixed(0)}%`),
 			),
 		),
 		section().id("block-reward").ariaLabel("Reward").append$(
